@@ -1,5 +1,5 @@
 // Package tui implements the interactive terminal UI used to collect cluster
-// parameters (provider, name, control planes, workers, Kubernetes version)
+// parameters (provider, name, control planes, workers, Kubernetes version, CNI)
 // before creation. It is built on github.com/gizak/termui/v3.
 package tui
 
@@ -13,15 +13,22 @@ import (
 	"github.com/rogerwesterbo/k8slocalcli/internal/cluster"
 )
 
-// field indices, in tab order.
+// Focusable items, in tab order. The first numFields are stacked input fields;
+// the last two are the Create / Cancel buttons.
 const (
 	fieldProvider = iota
 	fieldName
 	fieldControlPlanes
 	fieldWorkers
 	fieldK8sVersion
-	fieldCount
+	fieldCNI
+	fieldCreate
+	fieldCancel
+	focusCount
 )
+
+// numFields is the count of stacked input fields ([0..fieldCNI]).
+const numFields = fieldCNI + 1
 
 const (
 	// maxControlPlanes is deliberately small: each control plane adds an etcd
@@ -60,10 +67,12 @@ type form struct {
 	versions   map[cluster.Provider][]string
 	versionIdx int
 
-	title  *widgets.Paragraph
-	fields [fieldCount]*widgets.Paragraph
-	help   *widgets.Paragraph
-	status *widgets.Paragraph
+	title     *widgets.Paragraph
+	fields    [numFields]*widgets.Paragraph
+	createBtn *widgets.Paragraph
+	cancelBtn *widgets.Paragraph
+	help      *widgets.Paragraph
+	status    *widgets.Paragraph
 }
 
 // Run launches the interactive form, pre-filled from initial, and returns the
@@ -106,6 +115,9 @@ func newForm(initial cluster.Spec, versions map[cluster.Provider][]string) *form
 	if initial.ControlPlanes < 1 {
 		initial.ControlPlanes = cluster.DefaultControlPlanes
 	}
+	if !initial.CNI.Valid() {
+		initial.CNI = cluster.CNIDefault
+	}
 	if initial.HTTPPort == 0 {
 		initial.HTTPPort = cluster.DefaultHTTPPort
 	}
@@ -141,10 +153,16 @@ func newForm(initial cluster.Spec, versions map[cluster.Provider][]string) *form
 	f.fields[fieldControlPlanes].Title = " Control planes "
 	f.fields[fieldWorkers].Title = " Workers "
 	f.fields[fieldK8sVersion].Title = " Kubernetes version "
+	f.fields[fieldCNI].Title = " CNI (network plugin) "
+
+	f.createBtn = widgets.NewParagraph()
+	f.createBtn.WrapText = false
+	f.cancelBtn = widgets.NewParagraph()
+	f.cancelBtn.WrapText = false
 
 	f.help = widgets.NewParagraph()
 	f.help.Title = " Keys "
-	f.help.Text = "↑/↓ or Tab: move   ←/→: change value   type: edit   Enter: create   Esc: cancel"
+	f.help.Text = "↑/↓/Tab: move · ←/→: change · type: edit · Enter: next (Create to build) · Esc: cancel"
 	f.help.TextStyle = ui.NewStyle(ui.ColorWhite)
 
 	f.status = widgets.NewParagraph()
@@ -174,6 +192,12 @@ func (f *form) layout() {
 		y += fieldH
 	}
 
+	// Button row: Create on the left, Cancel on the right.
+	mid := x0 + w/2
+	f.createBtn.SetRect(x0, y, mid, y+3)
+	f.cancelBtn.SetRect(mid, y, x1, y+3)
+	y += 3
+
 	f.help.SetRect(x0, y, x1, y+3)
 	y += 3
 	f.status.SetRect(x0, y, x1, y+2)
@@ -181,7 +205,6 @@ func (f *form) layout() {
 
 // render refreshes every widget's content and draws the screen.
 func (f *form) render() {
-	// Provider field: show both options, mark the selected one.
 	f.fields[fieldProvider].Text = providerText(f.spec.Provider)
 
 	// Name field with a cursor when focused.
@@ -197,6 +220,7 @@ func (f *form) render() {
 	f.fields[fieldControlPlanes].Text = numberText(f.spec.ControlPlanes)
 	f.fields[fieldWorkers].Text = numberText(f.spec.Workers)
 	f.fields[fieldK8sVersion].Text = f.versionText()
+	f.fields[fieldCNI].Text = cniText(f.spec.CNI)
 
 	// Highlight the focused field.
 	for i, p := range f.fields {
@@ -209,6 +233,12 @@ func (f *form) render() {
 		}
 	}
 
+	// Buttons.
+	f.createBtn.Text = fillButton("Create", f.createBtn)
+	f.cancelBtn.Text = fillButton("Cancel", f.cancelBtn)
+	styleButton(f.createBtn, f.focus == fieldCreate, ui.ColorGreen)
+	styleButton(f.cancelBtn, f.focus == fieldCancel, ui.ColorRed)
+
 	if f.err != "" {
 		f.status.Text = "🛑 " + f.err
 		f.status.TextStyle = ui.NewStyle(ui.ColorRed)
@@ -217,11 +247,10 @@ func (f *form) render() {
 		f.status.TextStyle = ui.NewStyle(ui.ColorGreen)
 	}
 
-	drawables := []ui.Drawable{f.title, f.help, f.status}
+	ui.Render(f.title, f.createBtn, f.cancelBtn, f.help, f.status)
 	for _, p := range f.fields {
-		drawables = append(drawables, p)
+		ui.Render(p)
 	}
-	ui.Render(drawables...)
 }
 
 // handleKey processes a key press. It returns done=true with a Result when the
@@ -234,46 +263,70 @@ func (f *form) handleKey(id string) (done bool, res Result, err error) {
 		return true, Result{Confirmed: false}, nil
 
 	case "<Enter>":
+		return f.activate()
+
+	case "<Tab>", "<Down>":
+		f.focus = (f.focus + 1) % focusCount
+
+	case "<Up>":
+		f.focus = (f.focus - 1 + focusCount) % focusCount
+
+	case "<Left>":
+		f.moveOrAdjust(-1)
+
+	case "<Right>":
+		f.moveOrAdjust(+1)
+
+	case "<Backspace>", "<C-8>":
+		f.backspace()
+
+	case "<Space>":
+		switch f.focus {
+		case fieldProvider, fieldCNI:
+			f.adjust(+1)
+		case fieldCreate, fieldCancel:
+			return f.activate()
+		}
+
+	default:
+		f.typeRune(id)
+	}
+	return false, Result{}, nil
+}
+
+// activate handles Enter/Space on the focused item: submit on Create, cancel on
+// Cancel, and advance to the next item on any input field (so Enter walks the
+// form down to the Create button rather than submitting prematurely).
+func (f *form) activate() (bool, Result, error) {
+	switch f.focus {
+	case fieldCreate:
 		if verr := f.spec.Validate(); verr != nil {
 			f.err = verr.Error()
 			return false, Result{}, nil
 		}
 		return true, Result{Spec: f.spec, Confirmed: true}, nil
-
-	case "<Tab>", "<Down>":
-		f.focus = (f.focus + 1) % fieldCount
-		return false, Result{}, nil
-
-	case "<Up>":
-		f.focus = (f.focus - 1 + fieldCount) % fieldCount
-		return false, Result{}, nil
-
-	case "<Left>":
-		f.adjust(-1)
-		return false, Result{}, nil
-
-	case "<Right>":
-		f.adjust(+1)
-		return false, Result{}, nil
-
-	case "<Backspace>", "<C-8>":
-		f.backspace()
-		return false, Result{}, nil
-
-	case "<Space>":
-		// Space toggles the provider; ignored elsewhere (names have no spaces).
-		if f.focus == fieldProvider {
-			f.adjust(+1)
-		}
-		return false, Result{}, nil
-
+	case fieldCancel:
+		return true, Result{Confirmed: false}, nil
 	default:
-		f.typeRune(id)
+		f.focus = (f.focus + 1) % focusCount
 		return false, Result{}, nil
 	}
 }
 
-// adjust changes the focused field's value by delta (used by ←/→).
+// moveOrAdjust handles ←/→: it changes the value of an input field, or toggles
+// between the two buttons when one is focused.
+func (f *form) moveOrAdjust(delta int) {
+	switch f.focus {
+	case fieldCreate:
+		f.focus = fieldCancel
+	case fieldCancel:
+		f.focus = fieldCreate
+	default:
+		f.adjust(delta)
+	}
+}
+
+// adjust changes the focused input field's value by delta.
 func (f *form) adjust(delta int) {
 	switch f.focus {
 	case fieldProvider:
@@ -290,6 +343,8 @@ func (f *form) adjust(delta int) {
 			f.versionIdx = ((f.versionIdx+delta)%n + n) % n // wrap around
 			f.syncVersion()
 		}
+	case fieldCNI:
+		f.spec.CNI = cycleCNI(f.spec.CNI, delta)
 	}
 }
 
@@ -392,6 +447,31 @@ func providerText(p cluster.Provider) string {
 	return strings.Join(parts, "   ")
 }
 
+func cniText(c cluster.CNI) string {
+	var parts []string
+	for _, opt := range cluster.CNIs {
+		if opt == c {
+			parts = append(parts, "‹ "+string(opt)+" ›")
+		} else {
+			parts = append(parts, dim(string(opt)))
+		}
+	}
+	return strings.Join(parts, "   ")
+}
+
+// cycleCNI returns the next/previous CNI in cluster.CNIs, wrapping around.
+func cycleCNI(c cluster.CNI, delta int) cluster.CNI {
+	n := len(cluster.CNIs)
+	idx := 0
+	for i, opt := range cluster.CNIs {
+		if opt == c {
+			idx = i
+			break
+		}
+	}
+	return cluster.CNIs[((idx+delta)%n+n)%n]
+}
+
 func numberText(n int) string {
 	return fmt.Sprintf("%d", n)
 }
@@ -405,8 +485,12 @@ func summary(s cluster.Spec) string {
 	if ver == "" {
 		ver = "latest"
 	}
-	return fmt.Sprintf("Will create: %s/%s · k8s %s · %d control plane(s) · %d worker(s)",
-		s.Provider, name, ver, s.ControlPlanes, s.Workers)
+	cni := s.CNI
+	if cni == "" {
+		cni = cluster.CNIDefault
+	}
+	return fmt.Sprintf("Will create: %s/%s · k8s %s · %s CNI · %d control plane(s) · %d worker(s)",
+		s.Provider, name, ver, cni, s.ControlPlanes, s.Workers)
 }
 
 func otherProvider(p cluster.Provider) cluster.Provider {
@@ -416,6 +500,30 @@ func otherProvider(p cluster.Provider) cluster.Provider {
 		}
 	}
 	return cluster.Providers[0]
+}
+
+// styleButton colours a button paragraph; the focused button is filled with the
+// accent colour so it visibly looks pressed/selected.
+func styleButton(p *widgets.Paragraph, focused bool, accent ui.Color) {
+	if focused {
+		p.BorderStyle = ui.NewStyle(accent, ui.ColorClear, ui.ModifierBold)
+		p.TextStyle = ui.NewStyle(ui.ColorBlack, accent, ui.ModifierBold)
+	} else {
+		p.BorderStyle = ui.NewStyle(ui.ColorWhite)
+		p.TextStyle = ui.NewStyle(accent)
+	}
+}
+
+// fillButton centres a label across the button's inner width so the focused
+// background colour spans the whole button.
+func fillButton(label string, p *widgets.Paragraph) string {
+	w := p.Inner.Dx()
+	if w <= len(label) {
+		return label
+	}
+	total := w - len(label)
+	left := total / 2
+	return strings.Repeat(" ", left) + label + strings.Repeat(" ", total-left)
 }
 
 func clamp(v, lo, hi int) int {

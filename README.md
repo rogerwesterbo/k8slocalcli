@@ -29,6 +29,7 @@ version adds a typed, testable codebase and an interactive TUI.
 - [`kubectl`](https://kubernetes.io/docs/tasks/tools/) — to talk to the cluster.
 - For the **kind** provider: [`kind`](https://kind.sigs.k8s.io/).
 - For the **talos** provider: [`talosctl`](https://www.talos.dev/) (`brew install siderolabs/tap/talosctl`).
+- For the **Cilium**/**Calico** CNIs: [`helm`](https://helm.sh/) (not needed for the default CNI).
 
 Each provider checks its own prerequisites before doing anything and prints
 install hints if a tool is missing.
@@ -49,19 +50,25 @@ make install            # go install into your GOBIN
 k8slocalcli create
 ```
 
-You'll get a form with four fields:
+You'll get a form:
 
-| Field              | Keys                                              |
-|--------------------|---------------------------------------------------|
-| Provider           | `←` / `→` to toggle **kind** ↔ **talos**          |
-| Cluster name       | type (lowercase letters, digits, `-`)             |
-| Control planes     | `←` / `→` to adjust, or type a number             |
-| Workers            | `←` / `→` to adjust, or type a number             |
-| Kubernetes version | `←` / `→` to cycle versions (defaults to latest)  |
+| Field              | Keys                                                  |
+|--------------------|------------------------------------------------------|
+| Provider           | `←` / `→` to toggle **kind** ↔ **talos**             |
+| Cluster name       | type (lowercase letters, digits, `-`)                |
+| Control planes     | `←` / `→` to adjust, or type a number                |
+| Workers            | `←` / `→` to adjust, or type a number                |
+| Kubernetes version | `←` / `→` to cycle versions (defaults to latest)     |
+| CNI                | `←` / `→` to choose **default** / **cilium** / **calico** |
 
-`↑`/`↓` or `Tab` move between fields, `Enter` creates the cluster, `Esc` cancels.
+`↑`/`↓` or `Tab` move between fields. `Enter` advances to the next field; on the
+**Create** button it builds the cluster. There are explicit **Create** and
+**Cancel** buttons at the bottom — `←`/`→` switches between them. `Esc` cancels
+at any time.
+
 The version list is provider-specific; switching provider resets it to that
-provider's latest version.
+provider's latest version. Cilium/Calico are installed via Helm, so `helm` must
+be on your PATH when choosing them.
 
 ### Non-interactive (flags)
 
@@ -76,18 +83,22 @@ k8slocalcli create --name talosdev --provider talos --workers 1
 
 # pin a Kubernetes version and custom ingress host ports
 k8slocalcli create --name dev --k8s-version v1.33.12 --http-port 8080 --https-port 8443
+
+# use Cilium instead of the default CNI
+k8slocalcli create --name dev --cni cilium
 ```
 
 Flags:
 
 ```
 --name             cluster name (omit for interactive TUI)
---provider         kind | talos              (default kind)
---control-planes   number of control planes  (default 1)
---workers          number of workers         (default 0)
---k8s-version      Kubernetes version        (default: provider's newest)
---http-port        host port mapped to ingress :80   (default 80)
---https-port       host port mapped to ingress :443  (default 443)
+--provider         kind | talos                     (default kind)
+--control-planes   number of control planes         (default 1)
+--workers          number of workers                (default 0)
+--k8s-version      Kubernetes version               (default: provider's newest)
+--cni              default | cilium | calico         (default default)
+--http-port        host port mapped to ingress :80  (default 80)
+--https-port       host port mapped to ingress :443 (default 443)
 ```
 
 ### List and delete
@@ -110,6 +121,13 @@ k8slocalcli delete dev --provider talos
   multi-control-plane Talos). State is stored under `~/.k8slocalcli/clusters`.
   The Kubernetes version defaults to the newest entry in the Talos support
   matrix for your installed `talosctl`.
+- **CNI**: the default keeps the provider's built-in CNI (kindnet for kind,
+  Flannel for Talos). Choosing **Cilium** or **Calico** disables the default CNI
+  (via the kind config / a Talos machine-config patch) and installs the chosen
+  one with Helm using the values ported from `createlocalk8s`. With a custom CNI,
+  nodes stay `NotReady` until it finishes installing — this is expected.
+- **No workers**: when a cluster has 0 workers, the control-plane `NoSchedule`
+  taint is removed so workloads can run on it.
 
 ## Development
 

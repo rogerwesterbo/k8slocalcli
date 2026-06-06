@@ -75,11 +75,13 @@ func newCreateCmd() *cobra.Command {
 	flags.IntVar(&spec.ControlPlanes, "control-planes", spec.ControlPlanes, "number of control plane nodes")
 	flags.IntVar(&spec.Workers, "workers", spec.Workers, "number of worker nodes")
 	flags.StringVar(&spec.K8sVersion, "k8s-version", "", "Kubernetes version (default: provider's newest)")
+	cniFlag := flags.String("cni", string(spec.CNI), "CNI: default, cilium or calico")
 	flags.IntVar(&spec.HTTPPort, "http-port", spec.HTTPPort, "host port mapped to ingress :80")
 	flags.IntVar(&spec.HTTPSPort, "https-port", spec.HTTPSPort, "host port mapped to ingress :443")
 
 	cmd.PreRunE = func(_ *cobra.Command, _ []string) error {
 		spec.Provider = cluster.Provider(*providerFlag)
+		spec.CNI = cluster.CNI(*cniFlag)
 		return nil
 	}
 

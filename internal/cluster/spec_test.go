@@ -23,6 +23,9 @@ func TestSpecValidate(t *testing.T) {
 		{"space in name", func(s *Spec) { s.Name = "bad name" }, true},
 		{"unknown provider", func(s *Spec) { s.Provider = Provider("k3d") }, true},
 		{"talos provider", func(s *Spec) { s.Provider = ProviderTalos }, false},
+		{"unknown cni", func(s *Spec) { s.CNI = CNI("weave") }, true},
+		{"empty cni ok", func(s *Spec) { s.CNI = "" }, false},
+		{"cilium cni", func(s *Spec) { s.CNI = CNICilium }, false},
 		{"zero control planes", func(s *Spec) { s.ControlPlanes = 0 }, true},
 		{"negative workers", func(s *Spec) { s.Workers = -1 }, true},
 		{"zero workers ok", func(s *Spec) { s.Workers = 0 }, false},
@@ -52,6 +55,23 @@ func TestProviderValid(t *testing.T) {
 	}
 }
 
+func TestCNIValid(t *testing.T) {
+	for _, c := range CNIs {
+		if !c.Valid() {
+			t.Errorf("expected %q to be a valid CNI", c)
+		}
+	}
+	if CNI("weave").Valid() {
+		t.Error("expected unknown CNI to be invalid")
+	}
+	if !CNICilium.Custom() || !CNICalico.Custom() {
+		t.Error("expected cilium and calico to be custom CNIs")
+	}
+	if CNIDefault.Custom() || CNI("").Custom() {
+		t.Error("expected default/empty CNI to not be custom")
+	}
+}
+
 func TestDefaultSpec(t *testing.T) {
 	s := DefaultSpec()
 	if s.Provider != ProviderKind {
@@ -62,5 +82,8 @@ func TestDefaultSpec(t *testing.T) {
 	}
 	if s.Workers != 0 {
 		t.Errorf("default workers = %d, want 0", s.Workers)
+	}
+	if s.CNI != CNIDefault {
+		t.Errorf("default CNI = %q, want default", s.CNI)
 	}
 }

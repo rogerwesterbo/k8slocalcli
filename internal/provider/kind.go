@@ -71,8 +71,8 @@ func (k *Kind) Create(ctx context.Context, spec cluster.Spec, out io.Writer) err
 		return fmt.Errorf("closing kind config: %w", err)
 	}
 
-	fmt.Fprintf(out, "\n⏰ Creating kind cluster %q (%s, %d control plane(s), %d worker(s))\n",
-		spec.Name, version, spec.ControlPlanes, spec.Workers)
+	fmt.Fprintf(out, "\n⏰ Creating kind cluster %q (%s, CNI %s, %d control plane(s), %d worker(s))\n",
+		spec.Name, version, cniLabel(spec.CNI), spec.ControlPlanes, spec.Workers)
 
 	// Multiple control planes are heavy locally: kind adds a load balancer and
 	// each one is an etcd member that must reach quorum during kubeadm join.
@@ -92,8 +92,16 @@ func (k *Kind) Create(ctx context.Context, spec cluster.Spec, out io.Writer) err
 		return fmt.Errorf("could not switch kubectl context: %w", err)
 	}
 
+	// With a custom CNI the default was disabled, so nodes stay NotReady until
+	// we install the chosen CNI here.
+	if spec.CNI.Custom() {
+		if err := installCNI(ctx, k.Name(), spec.CNI, k.Context(spec.Name), out); err != nil {
+			return err
+		}
+	}
+
 	fmt.Fprintf(out, "\n⏰ Waiting for nodes to become Ready\n")
-	if err := r.Run(ctx, "kubectl", "wait", "--for=condition=Ready", "nodes", "--all", "--timeout=120s"); err != nil {
+	if err := r.Run(ctx, "kubectl", "wait", "--for=condition=Ready", "nodes", "--all", "--timeout=180s"); err != nil {
 		return fmt.Errorf("cluster nodes not ready in time: %w", err)
 	}
 
@@ -148,6 +156,10 @@ func kindConfig(spec cluster.Spec, image string) string {
 	b.WriteString("apiVersion: kind.x-k8s.io/v1alpha4\n")
 	b.WriteString("networking:\n")
 	b.WriteString("  ipFamily: dual\n")
+	if spec.CNI.Custom() {
+		// Disable kindnet so the chosen CNI can be installed afterwards.
+		b.WriteString("  disableDefaultCNI: true\n")
+	}
 	b.WriteString("nodes:\n")
 
 	for i := 0; i < spec.ControlPlanes; i++ {

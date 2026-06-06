@@ -71,6 +71,16 @@ Understanding these four seams is enough to be productive:
   more are requested. Talos state lives in `~/.k8slocalcli/clusters`.
 - **kind** puts the `ingress-ready` label and the `80`/`443` host port mappings
   on the *first* control-plane node only (`kindContext`/`kindConfig`).
+- **CNI** (`internal/provider/cni.go`): default keeps the provider's built-in CNI.
+  Cilium/Calico disable it (kind `disableDefaultCNI`; Talos machine-config patch
+  from `talosCNIPatch`) and install via Helm with per-provider values ported from
+  `createlocalk8s/scripts/installers/helm.sh`. Talos disables kube-proxy only for
+  Cilium (which replaces it). With a custom CNI on **Talos**, `talosctl cluster
+  create` would block forever (health checks need Ready nodes), so
+  `runTalosCreate` runs it in the background and returns once `apiReachable`,
+  then the CNI install brings nodes Ready. Cilium/Calico require `helm` on PATH.
+- **Zero workers**: `makeControlPlaneSchedulable` (`schedule.go`) removes the
+  control-plane `NoSchedule` taint so a control-plane-only cluster can run pods.
 - **Version selection**: an empty `Spec.K8sVersion` means "provider's newest" —
   kind uses `kindNodeImages[0]`, talos uses the newest entry in the support
   matrix for the installed `talosctl` (parsed from `talosctl version --client`).

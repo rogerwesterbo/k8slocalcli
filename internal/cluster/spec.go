@@ -31,6 +31,36 @@ func (p Provider) Valid() bool {
 	return false
 }
 
+// CNI identifies the container network interface to install. CNIDefault keeps
+// the provider's built-in CNI (kindnet for kind, Flannel for Talos); the others
+// disable the default and install the chosen CNI via Helm.
+type CNI string
+
+const (
+	CNIDefault CNI = "default"
+	CNICilium  CNI = "cilium"
+	CNICalico  CNI = "calico"
+)
+
+// CNIs is the ordered list of selectable CNIs (index 0 is the default).
+var CNIs = []CNI{CNIDefault, CNICilium, CNICalico}
+
+// Valid reports whether c is a known CNI.
+func (c CNI) Valid() bool {
+	for _, known := range CNIs {
+		if c == known {
+			return true
+		}
+	}
+	return false
+}
+
+// Custom reports whether c requires disabling the provider's default CNI and
+// installing a replacement.
+func (c CNI) Custom() bool {
+	return c != "" && c != CNIDefault
+}
+
 // Default values applied when the user does not override them.
 const (
 	DefaultControlPlanes = 1
@@ -55,6 +85,10 @@ type Spec struct {
 	// picks its own sensible default.
 	K8sVersion string
 
+	// CNI selects the cluster network plugin. Empty or CNIDefault keeps the
+	// provider's built-in CNI.
+	CNI CNI
+
 	// HTTPPort and HTTPSPort are the host ports mapped to the ingress
 	// controller on the first control-plane node.
 	HTTPPort  int
@@ -67,6 +101,7 @@ func DefaultSpec() Spec {
 		Provider:      ProviderKind,
 		ControlPlanes: DefaultControlPlanes,
 		Workers:       DefaultWorkers,
+		CNI:           CNIDefault,
 		HTTPPort:      DefaultHTTPPort,
 		HTTPSPort:     DefaultHTTPSPort,
 	}
@@ -86,6 +121,9 @@ func (s Spec) Validate() error {
 	}
 	if !s.Provider.Valid() {
 		return fmt.Errorf("unknown provider %q (supported: kind, talos)", s.Provider)
+	}
+	if s.CNI != "" && !s.CNI.Valid() {
+		return fmt.Errorf("unknown CNI %q (supported: default, cilium, calico)", s.CNI)
 	}
 	if s.ControlPlanes < 1 {
 		return fmt.Errorf("at least one control plane is required")

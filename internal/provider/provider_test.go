@@ -80,6 +80,45 @@ func TestKindConfig(t *testing.T) {
 	}
 }
 
+func TestKindConfigDefaultCNI(t *testing.T) {
+	spec := cluster.Spec{Name: "x", ControlPlanes: 1, HTTPPort: 80, HTTPSPort: 443, CNI: cluster.CNIDefault}
+	if cfg := kindConfig(spec, "img"); strings.Contains(cfg, "disableDefaultCNI") {
+		t.Errorf("default CNI should not disable kindnet:\n%s", cfg)
+	}
+}
+
+func TestKindConfigCustomCNI(t *testing.T) {
+	spec := cluster.Spec{Name: "x", ControlPlanes: 1, HTTPPort: 80, HTTPSPort: 443, CNI: cluster.CNICilium}
+	if cfg := kindConfig(spec, "img"); !strings.Contains(cfg, "disableDefaultCNI: true") {
+		t.Errorf("custom CNI must disable kindnet:\n%s", cfg)
+	}
+}
+
+func TestTalosCNIPatch(t *testing.T) {
+	// Cilium replaces kube-proxy, so the patch disables both CNI and proxy.
+	cilium := talosCNIPatch(cluster.CNICilium)
+	if !strings.Contains(cilium, "name: none") || !strings.Contains(cilium, "disabled: true") {
+		t.Errorf("cilium patch should disable cni and proxy:\n%s", cilium)
+	}
+	// Calico keeps kube-proxy, so the patch only disables the CNI.
+	calico := talosCNIPatch(cluster.CNICalico)
+	if !strings.Contains(calico, "name: none") {
+		t.Errorf("calico patch should disable cni:\n%s", calico)
+	}
+	if strings.Contains(calico, "proxy") {
+		t.Errorf("calico patch should not disable kube-proxy:\n%s", calico)
+	}
+}
+
+func TestCNILabel(t *testing.T) {
+	if got := cniLabel(""); got != "default" {
+		t.Errorf("cniLabel(\"\") = %q, want default", got)
+	}
+	if got := cniLabel(cluster.CNICilium); got != "cilium" {
+		t.Errorf("cniLabel(cilium) = %q, want cilium", got)
+	}
+}
+
 func TestKindConfigNoWorkers(t *testing.T) {
 	spec := cluster.Spec{Name: "x", ControlPlanes: 1, Workers: 0, HTTPPort: 80, HTTPSPort: 443}
 	cfg := kindConfig(spec, "img")
