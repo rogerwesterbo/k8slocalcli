@@ -50,7 +50,12 @@ func newCreateCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			interactive := spec.Name == ""
 			if interactive {
-				res, err := tui.Run(spec)
+				ctx := cmd.Context()
+				versions := map[cluster.Provider][]string{}
+				for _, p := range provider.All() {
+					versions[p.Name()] = p.KubernetesVersions(ctx)
+				}
+				res, err := tui.Run(spec, versions)
 				if err != nil {
 					return err
 				}

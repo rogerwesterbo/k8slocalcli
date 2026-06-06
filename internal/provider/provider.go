@@ -34,6 +34,11 @@ type Provider interface {
 
 	// Kubeconfig returns the kubectl context name used for the cluster.
 	Context(name string) string
+
+	// KubernetesVersions returns the Kubernetes versions this provider can
+	// create, newest first (index 0 is the default/latest). The list may depend
+	// on the installed tooling, hence the context.
+	KubernetesVersions(ctx context.Context) []string
 }
 
 // registry holds the available providers keyed by name.

@@ -74,6 +74,9 @@ Understanding these four seams is enough to be productive:
 - **Version selection**: an empty `Spec.K8sVersion` means "provider's newest" —
   kind uses `kindNodeImages[0]`, talos uses the newest entry in the support
   matrix for the installed `talosctl` (parsed from `talosctl version --client`).
+  `Provider.KubernetesVersions(ctx)` exposes the selectable list (newest first,
+  index 0 = latest); the TUI uses it for the version field, and the create
+  command pre-computes a `map[provider][]versions` to pass into `tui.Run`.
 
 ## Testing notes
 

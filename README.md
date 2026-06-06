@@ -51,14 +51,17 @@ k8slocalcli create
 
 You'll get a form with four fields:
 
-| Field          | Keys                                              |
-|----------------|---------------------------------------------------|
-| Provider       | `←` / `→` to toggle **kind** ↔ **talos**          |
-| Cluster name   | type (lowercase letters, digits, `-`)             |
-| Control planes | `←` / `→` to adjust, or type a number             |
-| Workers        | `←` / `→` to adjust, or type a number             |
+| Field              | Keys                                              |
+|--------------------|---------------------------------------------------|
+| Provider           | `←` / `→` to toggle **kind** ↔ **talos**          |
+| Cluster name       | type (lowercase letters, digits, `-`)             |
+| Control planes     | `←` / `→` to adjust, or type a number             |
+| Workers            | `←` / `→` to adjust, or type a number             |
+| Kubernetes version | `←` / `→` to cycle versions (defaults to latest)  |
 
 `↑`/`↓` or `Tab` move between fields, `Enter` creates the cluster, `Esc` cancels.
+The version list is provider-specific; switching provider resets it to that
+provider's latest version.
 
 ### Non-interactive (flags)
 

@@ -26,6 +26,12 @@ func (t *Talos) Name() cluster.Provider { return cluster.ProviderTalos }
 // Context implements Provider. talosctl names the admin context "admin@<name>".
 func (t *Talos) Context(name string) string { return "admin@" + name }
 
+// KubernetesVersions implements Provider, returning the Kubernetes versions
+// supported by the installed talosctl (newest first).
+func (t *Talos) KubernetesVersions(ctx context.Context) []string {
+	return talosK8sVersionsFor(t.majorMinor(ctx))
+}
+
 // CheckPrerequisites implements Provider.
 func (t *Talos) CheckPrerequisites() error {
 	var missing []string
@@ -101,6 +107,12 @@ func (t *Talos) Create(ctx context.Context, spec cluster.Spec, out io.Writer) er
 		fmt.Fprintf(out, "⚠️  Could not merge kubeconfig automatically: %v\n", err)
 	} else if err := fixKubeconfigServer(ctx, r, spec.Name, out); err != nil {
 		fmt.Fprintf(out, "⚠️  Could not point kubeconfig at the host port (kubectl may time out): %v\n", err)
+	}
+
+	// The Docker backend has a single control plane and usually no workers, so
+	// without this there is nowhere to schedule pods.
+	if spec.Workers == 0 {
+		makeControlPlaneSchedulable(ctx, t.Context(spec.Name), out)
 	}
 
 	fmt.Fprintf(out, "\n✅ Talos cluster %q is ready\n", spec.Name)

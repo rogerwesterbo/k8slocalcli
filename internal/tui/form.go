@@ -1,6 +1,6 @@
 // Package tui implements the interactive terminal UI used to collect cluster
-// parameters (provider, name, control planes, workers) before creation. It is
-// built on github.com/gizak/termui/v3.
+// parameters (provider, name, control planes, workers, Kubernetes version)
+// before creation. It is built on github.com/gizak/termui/v3.
 package tui
 
 import (
@@ -19,13 +19,18 @@ const (
 	fieldName
 	fieldControlPlanes
 	fieldWorkers
+	fieldK8sVersion
 	fieldCount
 )
 
 const (
-	maxNodes   = 9  // sane upper bound for local clusters
-	formWidth  = 72 // characters
-	formMargin = 1  // left/top margin
+	// maxControlPlanes is deliberately small: each control plane adds an etcd
+	// member, and many of them on a single Docker host make kubeadm joins time
+	// out (kind also adds a load balancer for >1). Odd counts are best.
+	maxControlPlanes = 5
+	maxWorkers       = 9  // sane upper bound for a local Docker host
+	formWidth        = 72 // characters
+	formMargin       = 1  // left/top margin
 )
 
 // banner is the ASCII logo shown at the top of the form.
@@ -49,6 +54,12 @@ type form struct {
 	focus int
 	err   string
 
+	// versions maps each provider to its selectable Kubernetes versions,
+	// newest first (index 0 is "latest"). versionIdx points into the current
+	// provider's slice.
+	versions   map[cluster.Provider][]string
+	versionIdx int
+
 	title  *widgets.Paragraph
 	fields [fieldCount]*widgets.Paragraph
 	help   *widgets.Paragraph
@@ -56,14 +67,15 @@ type form struct {
 }
 
 // Run launches the interactive form, pre-filled from initial, and returns the
-// collected Spec. It blocks until the user confirms or cancels.
-func Run(initial cluster.Spec) (Result, error) {
+// collected Spec. versions provides the selectable Kubernetes versions per
+// provider (newest first). It blocks until the user confirms or cancels.
+func Run(initial cluster.Spec, versions map[cluster.Provider][]string) (Result, error) {
 	if err := ui.Init(); err != nil {
 		return Result{}, fmt.Errorf("could not start the terminal UI (are you on an interactive terminal?): %w", err)
 	}
 	defer ui.Close()
 
-	f := newForm(initial)
+	f := newForm(initial, versions)
 	f.layout()
 	f.render()
 
@@ -87,7 +99,7 @@ func Run(initial cluster.Spec) (Result, error) {
 	return Result{}, nil
 }
 
-func newForm(initial cluster.Spec) *form {
+func newForm(initial cluster.Spec, versions map[cluster.Provider][]string) *form {
 	if !initial.Provider.Valid() {
 		initial.Provider = cluster.ProviderKind
 	}
@@ -101,7 +113,20 @@ func newForm(initial cluster.Spec) *form {
 		initial.HTTPSPort = cluster.DefaultHTTPSPort
 	}
 
-	f := &form{spec: initial, focus: fieldName}
+	f := &form{spec: initial, focus: fieldName, versions: versions}
+
+	// Resolve the initial version selection: honour a pre-set version, else
+	// default to the latest (index 0).
+	f.versionIdx = 0
+	if initial.K8sVersion != "" {
+		for i, v := range f.currentVersions() {
+			if versionsEqual(v, initial.K8sVersion) {
+				f.versionIdx = i
+				break
+			}
+		}
+	}
+	f.syncVersion()
 
 	f.title = widgets.NewParagraph()
 	f.title.Border = false
@@ -109,13 +134,13 @@ func newForm(initial cluster.Spec) *form {
 	f.title.TextStyle = ui.NewStyle(ui.ColorCyan)
 
 	for i := range f.fields {
-		p := widgets.NewParagraph()
-		f.fields[i] = p
+		f.fields[i] = widgets.NewParagraph()
 	}
 	f.fields[fieldProvider].Title = " Provider "
 	f.fields[fieldName].Title = " Cluster name "
 	f.fields[fieldControlPlanes].Title = " Control planes "
 	f.fields[fieldWorkers].Title = " Workers "
+	f.fields[fieldK8sVersion].Title = " Kubernetes version "
 
 	f.help = widgets.NewParagraph()
 	f.help.Title = " Keys "
@@ -171,6 +196,7 @@ func (f *form) render() {
 
 	f.fields[fieldControlPlanes].Text = numberText(f.spec.ControlPlanes)
 	f.fields[fieldWorkers].Text = numberText(f.spec.Workers)
+	f.fields[fieldK8sVersion].Text = f.versionText()
 
 	// Highlight the focused field.
 	for i, p := range f.fields {
@@ -252,10 +278,18 @@ func (f *form) adjust(delta int) {
 	switch f.focus {
 	case fieldProvider:
 		f.spec.Provider = otherProvider(f.spec.Provider)
+		// Different providers support different versions; reset to latest.
+		f.versionIdx = 0
+		f.syncVersion()
 	case fieldControlPlanes:
-		f.spec.ControlPlanes = clamp(f.spec.ControlPlanes+delta, 1, maxNodes)
+		f.spec.ControlPlanes = clamp(f.spec.ControlPlanes+delta, 1, maxControlPlanes)
 	case fieldWorkers:
-		f.spec.Workers = clamp(f.spec.Workers+delta, 0, maxNodes)
+		f.spec.Workers = clamp(f.spec.Workers+delta, 0, maxWorkers)
+	case fieldK8sVersion:
+		if n := len(f.currentVersions()); n > 0 {
+			f.versionIdx = ((f.versionIdx+delta)%n + n) % n // wrap around
+			f.syncVersion()
+		}
 	}
 }
 
@@ -267,7 +301,7 @@ func (f *form) backspace() {
 			f.spec.Name = f.spec.Name[:n-1]
 		}
 	case fieldControlPlanes:
-		f.spec.ControlPlanes = clamp(f.spec.ControlPlanes/10, 1, maxNodes)
+		f.spec.ControlPlanes = clamp(f.spec.ControlPlanes/10, 1, maxControlPlanes)
 	case fieldWorkers:
 		f.spec.Workers = f.spec.Workers / 10
 	}
@@ -292,14 +326,56 @@ func (f *form) typeRune(id string) {
 			}
 		}
 	case fieldControlPlanes:
+		// Maxima are single digits, so a typed digit replaces the value
+		// (typing "3" sets 3, rather than appending to the current value).
 		if r >= '0' && r <= '9' {
-			f.spec.ControlPlanes = clamp(f.spec.ControlPlanes*10+int(r-'0'), 1, maxNodes)
+			f.spec.ControlPlanes = clamp(int(r-'0'), 1, maxControlPlanes)
 		}
 	case fieldWorkers:
 		if r >= '0' && r <= '9' {
-			f.spec.Workers = clamp(f.spec.Workers*10+int(r-'0'), 0, maxNodes)
+			f.spec.Workers = clamp(int(r-'0'), 0, maxWorkers)
 		}
 	}
+}
+
+// --- version helpers ---
+
+// currentVersions returns the selectable versions for the focused provider.
+func (f *form) currentVersions() []string {
+	if f.versions == nil {
+		return nil
+	}
+	return f.versions[f.spec.Provider]
+}
+
+// syncVersion writes the currently selected version into the spec.
+func (f *form) syncVersion() {
+	vs := f.currentVersions()
+	if len(vs) == 0 {
+		f.spec.K8sVersion = ""
+		return
+	}
+	if f.versionIdx < 0 || f.versionIdx >= len(vs) {
+		f.versionIdx = 0
+	}
+	f.spec.K8sVersion = vs[f.versionIdx]
+}
+
+func (f *form) versionText() string {
+	vs := f.currentVersions()
+	if len(vs) == 0 {
+		return dim("(provider default)")
+	}
+	v := vs[f.versionIdx]
+	if f.versionIdx == 0 {
+		return v + "   " + dim("(latest)")
+	}
+	return v
+}
+
+// versionsEqual compares two version strings ignoring a leading "v".
+func versionsEqual(a, b string) bool {
+	return strings.TrimPrefix(a, "v") == strings.TrimPrefix(b, "v")
 }
 
 // --- small rendering helpers ---
@@ -325,8 +401,12 @@ func summary(s cluster.Spec) string {
 	if name == "" {
 		name = "<name>"
 	}
-	return fmt.Sprintf("Will create: %s/%s · %d control plane(s) · %d worker(s)",
-		s.Provider, name, s.ControlPlanes, s.Workers)
+	ver := s.K8sVersion
+	if ver == "" {
+		ver = "latest"
+	}
+	return fmt.Sprintf("Will create: %s/%s · k8s %s · %d control plane(s) · %d worker(s)",
+		s.Provider, name, ver, s.ControlPlanes, s.Workers)
 }
 
 func otherProvider(p cluster.Provider) cluster.Provider {

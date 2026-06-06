@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -94,6 +95,22 @@ func TestParseTalosMajorMinor(t *testing.T) {
 	}
 	if got := parseTalosMajorMinor("no version here"); got != "" {
 		t.Errorf("expected empty result, got %q", got)
+	}
+}
+
+func TestKubernetesVersions(t *testing.T) {
+	// kind: returns all pinned versions, newest first, with the latest at [0].
+	kv := NewKind().KubernetesVersions(context.Background())
+	if len(kv) == 0 {
+		t.Fatal("expected kind to report versions")
+	}
+	if kv[0] != kindNodeImages[0].Version {
+		t.Errorf("kind latest = %q, want %q", kv[0], kindNodeImages[0].Version)
+	}
+	// talos: non-empty (falls back to the latest known set when talosctl is
+	// absent or unrecognised).
+	if tv := NewTalos().KubernetesVersions(context.Background()); len(tv) == 0 {
+		t.Error("expected talos to report versions")
 	}
 }
 

@@ -23,6 +23,16 @@ func (k *Kind) Name() cluster.Provider { return cluster.ProviderKind }
 // Context implements Provider. kind prefixes contexts with "kind-".
 func (k *Kind) Context(name string) string { return "kind-" + name }
 
+// KubernetesVersions implements Provider, returning the pinned kind node-image
+// versions newest first.
+func (k *Kind) KubernetesVersions(_ context.Context) []string {
+	out := make([]string, 0, len(kindNodeImages))
+	for _, e := range kindNodeImages {
+		out = append(out, e.Version)
+	}
+	return out
+}
+
 // CheckPrerequisites implements Provider.
 func (k *Kind) CheckPrerequisites() error {
 	var missing []string
@@ -64,6 +74,15 @@ func (k *Kind) Create(ctx context.Context, spec cluster.Spec, out io.Writer) err
 	fmt.Fprintf(out, "\n⏰ Creating kind cluster %q (%s, %d control plane(s), %d worker(s))\n",
 		spec.Name, version, spec.ControlPlanes, spec.Workers)
 
+	// Multiple control planes are heavy locally: kind adds a load balancer and
+	// each one is an etcd member that must reach quorum during kubeadm join.
+	if spec.ControlPlanes%2 == 0 {
+		fmt.Fprintf(out, "ℹ️  An odd number of control planes (1, 3, 5) is recommended for etcd quorum.\n")
+	}
+	if spec.ControlPlanes > 3 {
+		fmt.Fprintf(out, "⚠️  %d control planes is heavy for a single Docker host; kind may time out joining them all. 1 or 3 is recommended.\n", spec.ControlPlanes)
+	}
+
 	if err := r.Run(ctx, "kind", "create", "cluster", "--name", spec.Name, "--config", cfgFile.Name()); err != nil {
 		return fmt.Errorf("could not create kind cluster: %w", err)
 	}
@@ -76,6 +95,10 @@ func (k *Kind) Create(ctx context.Context, spec cluster.Spec, out io.Writer) err
 	fmt.Fprintf(out, "\n⏰ Waiting for nodes to become Ready\n")
 	if err := r.Run(ctx, "kubectl", "wait", "--for=condition=Ready", "nodes", "--all", "--timeout=120s"); err != nil {
 		return fmt.Errorf("cluster nodes not ready in time: %w", err)
+	}
+
+	if spec.Workers == 0 {
+		makeControlPlaneSchedulable(ctx, k.Context(spec.Name), out)
 	}
 
 	fmt.Fprintf(out, "\n✅ kind cluster %q is ready\n", spec.Name)
