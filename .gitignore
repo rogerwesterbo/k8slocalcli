@@ -1,0 +1,42 @@
+# Binaries and build output
+/bin/
+/k8slocalcli
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test & coverage artifacts
+*.out
+*.test
+coverage.out
+coverage.html
+
+# Profiling output
+*.prof
+bench.cpu
+bench.mem
+
+# Go workspace (local-only, not committed)
+go.work
+go.work.sum
+
+# Vendored dependencies (this project uses the module cache)
+/vendor/
+
+# Cluster state created by talosctl (when run with the default state dir)
+/clusters/
+
+# Local kube/talos configs written during testing
+/kube.config
+*.kubeconfig
+talosconfig
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Claude Code local settings (user-specific)
+.claude/settings.local.json

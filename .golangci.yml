@@ -1,0 +1,11 @@
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      # Writes to user-facing output streams (stdout/stderr/in-memory buffers)
+      # return errors that are not actionable; ignoring them is idiomatic here.
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
