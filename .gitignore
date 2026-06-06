@@ -32,6 +32,9 @@ go.work.sum
 *.kubeconfig
 talosconfig
 
+# Environment files
+.env
+
 # Editor / OS
 .DS_Store
 .idea/
