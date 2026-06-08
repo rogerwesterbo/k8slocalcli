@@ -105,9 +105,14 @@ Flags:
 
 ```sh
 k8slocalcli list                 # clusters from both providers + kubectl context
-k8slocalcli delete dev           # provider auto-detected
+k8slocalcli delete               # interactive picker of existing clusters
+k8slocalcli delete dev           # delete by name (provider auto-detected)
 k8slocalcli delete dev --provider talos
 ```
+
+`list` is aliased to `ls`, and `delete` to `d` / `rm`. Running `delete` with no
+name opens a picker (`↑`/`↓` to move, `Enter` to select, then `y` to confirm,
+`Esc` to cancel).
 
 ## Provider notes
 
