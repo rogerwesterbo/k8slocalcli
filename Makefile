@@ -106,6 +106,13 @@ tidy: ## Tidy and verify modules.
 	@go mod tidy
 	@go mod verify
 
+.PHONY: update-deps
+update-deps: ## Update dependencies to their latest versions.
+	@printf "$(CYAN)Updating dependencies...$(RESET)\n"
+	@go get -u ./...
+	@go mod tidy
+	@printf "$(GREEN)✓ Dependencies updated$(RESET)\n"
+
 ##@ Security
 .PHONY: gosec
 gosec: install-security-scanner ## Run gosec security scan.

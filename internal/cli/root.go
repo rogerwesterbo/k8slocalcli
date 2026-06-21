@@ -20,6 +20,11 @@ var version = "dev"
 // Execute builds and runs the root command.
 func Execute(ctx context.Context) error {
 	root := newRootCmd()
+	// Before handing off to cobra, see if this invocation targets an external
+	// k8slocalcli-* plugin on PATH; if so, exec it instead.
+	if handled, err := maybeDispatchPlugin(root); handled {
+		return err
+	}
 	return root.ExecuteContext(ctx)
 }
 
@@ -34,7 +39,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		Version:       version,
 	}
-	root.AddCommand(newCreateCmd(), newListCmd(), newDeleteCmd())
+	root.AddCommand(newCreateCmd(), newListCmd(), newDeleteCmd(), newPluginCmd())
 	return root
 }
 

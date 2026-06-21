@@ -1,0 +1,27 @@
+# plugins.yaml — curated index of k8slocalcli-installable plugins.
+#
+# k8slocalcli fetches this file at runtime (from raw.githubusercontent.com on
+# the main branch) to resolve short plugin names to GitHub repos. Adding a
+# third-party plugin is a single PR against this file; no k8slocalcli release
+# is required for the plugin to become installable.
+#
+# Per-entry fields:
+#   name:         short name used on the command line
+#                 (e.g. "foo" -> k8slocalcli-foo, invoked as `k8slocalcli foo`)
+#   repo:         <owner>/<repo> hosting the plugin's GitHub releases
+#   description:  one-line summary shown by `k8slocalcli plugin list --available`
+#
+# Optional overrides (defaults cover the canonical
+# "k8slocalcli-<name> in its own repo" layout):
+#   archiveAsset:        asset filename template; default
+#                        "k8slocalcli-{name}-{version}-{os}-{arch}.tar.gz"
+#   archiveInnerPath:    path to the binary inside the archive; default
+#                        "k8slocalcli-{name}-{version}-{os}-{arch}/k8slocalcli-{name}"
+#   checksumsAsset:      SHA256SUMS filename template; default
+#                        "k8slocalcli-{name}-{version}-SHA256SUMS"
+#   cosignIdentityRegex: OIDC identity regex for cosign verify-blob; default
+#                        "^https://github.com/{repo}/.github/workflows/release.yml@refs/tags/"
+#
+# Template placeholders: {name} {repo} {version} {os} {arch}
+
+plugins: []
