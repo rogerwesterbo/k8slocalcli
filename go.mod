@@ -1,6 +1,6 @@
 module github.com/rogerwesterbo/k8slocalcli
 
-go 1.27.0
+go 1.27.1
 
 require (
 	github.com/gizak/termui/v3 v3.1.0
