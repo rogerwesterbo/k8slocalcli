@@ -32,8 +32,17 @@ type Provider interface {
 	// Exists reports whether a cluster with the given name already exists.
 	Exists(ctx context.Context, name string) (bool, error)
 
-	// Kubeconfig returns the kubectl context name used for the cluster.
+	// Context returns the kubectl context name used for the cluster.
 	Context(name string) string
+
+	// Kubeconfig returns a standalone admin kubeconfig for the cluster whose
+	// API server URL is reachable from the host.
+	Kubeconfig(ctx context.Context, name string) ([]byte, error)
+
+	// MergeKubeconfig merges the cluster's kubeconfig into the user's default
+	// kubeconfig ($KUBECONFIG or ~/.kube/config) and makes it the current
+	// context, streaming progress to out.
+	MergeKubeconfig(ctx context.Context, name string, out io.Writer) error
 
 	// KubernetesVersions returns the Kubernetes versions this provider can
 	// create, newest first (index 0 is the default/latest). The list may depend

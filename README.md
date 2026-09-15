@@ -114,6 +114,23 @@ k8slocalcli delete dev --provider talos
 name opens a picker (`↑`/`↓` to move, `Enter` to select, then `y` to confirm,
 `Esc` to cancel).
 
+### Kubeconfig
+
+Fetch a cluster's admin kubeconfig from its provider (`kind get kubeconfig` for
+kind, `talosctl kubeconfig` for talos — with the API server URL rewritten to the
+host-mapped port so it is reachable from the host):
+
+```sh
+k8slocalcli kubeconfig dev                        # print to stdout
+k8slocalcli kubeconfig dev -o ~/.kube/dev.yaml     # write to a file (mode 0600)
+k8slocalcli kubeconfig dev --merge                 # merge into ~/.kube/config and switch context
+k8slocalcli kubeconfig                             # pick a cluster interactively
+k8slocalcli kubeconfig talosdev --provider talos
+```
+
+The provider is auto-detected like `delete`. `kubeconfig` is aliased to `kc`;
+`--output` and `--merge` are mutually exclusive.
+
 ## Provider notes
 
 - **kind**: the first control-plane node is labelled `ingress-ready` and gets the
@@ -125,11 +142,15 @@ name opens a picker (`↑`/`↓` to move, `Enter` to select, then `y` to confirm
   the tool warns and creates one (use the QEMU backend, not covered here, for
   multi-control-plane Talos). State is stored under `~/.k8slocalcli/clusters`.
   The Kubernetes version defaults to the newest entry in the Talos support
-  matrix for your installed `talosctl`.
+  matrix for your installed `talosctl` (Talos 1.14 → Kubernetes 1.37.0, with
+  1.33–1.37 selectable).
 - **CNI**: the default keeps the provider's built-in CNI (kindnet for kind,
   Flannel for Talos). Choosing **Cilium** or **Calico** disables the default CNI
   (via the kind config / a Talos machine-config patch) and installs the chosen
-  one with Helm using the values ported from `createlocalk8s`. With a custom CNI,
+  one with Helm using the values ported from `createlocalk8s`. On Talos 1.14+
+  the patch deletes the `KubeFlannelCNIConfig` document (and sets
+  `KubeProxyConfig` `enabled: false` for Cilium); older `talosctl` versions get
+  the legacy `cluster.network.cni` / `cluster.proxy` patch, which 1.14 rejects. With a custom CNI,
   nodes stay `NotReady` until it finishes installing — this is expected.
 - **No workers**: when a cluster has 0 workers, the control-plane `NoSchedule`
   taint is removed so workloads can run on it.
@@ -153,7 +174,7 @@ internal/cluster     provider-agnostic Spec + validation
 internal/runner      shared streaming command runner
 internal/provider    Provider interface, registry, kind + talos, version tables
 internal/tui         termui/v3 interactive form
-internal/cli         cobra command tree (create / list / delete)
+internal/cli         cobra command tree (create / list / delete / kubeconfig)
 ```
 
 Both providers share `internal/runner` and the `internal/provider` interface, and

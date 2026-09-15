@@ -9,7 +9,7 @@ import (
 	"github.com/rogerwesterbo/k8slocalcli/internal/cluster"
 )
 
-// ClusterChoice is one selectable cluster in the delete picker.
+// ClusterChoice is one selectable cluster in the cluster picker.
 type ClusterChoice struct {
 	Provider cluster.Provider
 	Name     string
@@ -19,10 +19,23 @@ func (c ClusterChoice) label() string {
 	return fmt.Sprintf("%-7s  %s", c.Provider, c.Name)
 }
 
+// SelectCluster shows an interactive list of clusters and returns the chosen
+// one as soon as it is selected. ok is false when the user cancels (or there is
+// nothing to choose from).
+func SelectCluster(title string, choices []ClusterChoice) (choice ClusterChoice, ok bool, err error) {
+	return selectCluster(title, choices, false)
+}
+
 // SelectClusterToDelete shows an interactive list of clusters and requires an
 // explicit confirmation before returning the chosen one. ok is false when the
 // user cancels (or there is nothing to choose from).
 func SelectClusterToDelete(choices []ClusterChoice) (choice ClusterChoice, ok bool, err error) {
+	return selectCluster(" Select a cluster to delete ", choices, true)
+}
+
+// selectCluster runs the picker. With confirmDelete set, Enter asks for a "y"
+// confirmation before returning the selection.
+func selectCluster(title string, choices []ClusterChoice, confirmDelete bool) (ClusterChoice, bool, error) {
 	if len(choices) == 0 {
 		return ClusterChoice{}, false, nil
 	}
@@ -32,12 +45,15 @@ func SelectClusterToDelete(choices []ClusterChoice) (choice ClusterChoice, ok bo
 	defer ui.Close()
 
 	list := widgets.NewList()
-	list.Title = " Select a cluster to delete "
+	list.Title = title
 	list.Rows = make([]string, len(choices))
 	for i, c := range choices {
 		list.Rows[i] = c.label()
 	}
-	list.SelectedRowStyle = ui.NewStyle(ui.ColorBlack, ui.ColorRed)
+	list.SelectedRowStyle = ui.NewStyle(ui.ColorBlack, ui.ColorCyan)
+	if confirmDelete {
+		list.SelectedRowStyle = ui.NewStyle(ui.ColorBlack, ui.ColorRed)
+	}
 	list.BorderStyle = ui.NewStyle(ui.ColorYellow)
 
 	help := widgets.NewParagraph()
@@ -56,10 +72,7 @@ func SelectClusterToDelete(choices []ClusterChoice) (choice ClusterChoice, ok bo
 		if w <= 0 || w > 80 {
 			w = 80
 		}
-		listH := len(choices) + 2
-		if listH > 16 {
-			listH = 16
-		}
+		listH := min(len(choices)+2, 16)
 		list.SetRect(1, 1, w-1, 1+listH)
 		help.SetRect(1, 1+listH, w-1, 1+listH+2)
 		confirm.SetRect(1, 1+listH+2, w-1, 1+listH+5)
@@ -106,6 +119,9 @@ func SelectClusterToDelete(choices []ClusterChoice) (choice ClusterChoice, ok bo
 		case "<Up>", "k":
 			list.ScrollUp()
 		case "<Enter>":
+			if !confirmDelete {
+				return choices[list.SelectedRow], true, nil
+			}
 			confirming = true
 		}
 		render()

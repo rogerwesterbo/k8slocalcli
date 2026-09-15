@@ -39,7 +39,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		Version:       version,
 	}
-	root.AddCommand(newCreateCmd(), newListCmd(), newDeleteCmd(), newPluginCmd())
+	root.AddCommand(newCreateCmd(), newListCmd(), newDeleteCmd(), newKubeconfigCmd(), newPluginCmd())
 	return root
 }
 
@@ -120,6 +120,7 @@ func runCreate(ctx context.Context, spec cluster.Spec, out io.Writer) error {
 
 	fmt.Fprintf(out, "\nkubectl context: %s\n", p.Context(spec.Name))
 	fmt.Fprintf(out, "Try: kubectl --context %s get nodes\n", p.Context(spec.Name))
+	fmt.Fprintf(out, "Kubeconfig: k8slocalcli kubeconfig %s --output %s.kubeconfig\n", spec.Name, spec.Name)
 	return nil
 }
 

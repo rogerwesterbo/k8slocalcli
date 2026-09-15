@@ -124,6 +124,25 @@ func (k *Kind) Delete(ctx context.Context, name string, out io.Writer) error {
 	return nil
 }
 
+// Kubeconfig implements Provider. kind already records the host-mapped API
+// server address, so its output is usable as is.
+func (k *Kind) Kubeconfig(ctx context.Context, name string) ([]byte, error) {
+	cfg, err := runner.New(nil).Capture(ctx, "kind", "get", "kubeconfig", "--name", name)
+	if err != nil {
+		return nil, fmt.Errorf("could not get kubeconfig for kind cluster %q: %w", name, err)
+	}
+	return []byte(cfg + "\n"), nil
+}
+
+// MergeKubeconfig implements Provider. `kind export kubeconfig` merges and
+// switches the current context in one step.
+func (k *Kind) MergeKubeconfig(ctx context.Context, name string, out io.Writer) error {
+	if err := runner.New(out).Run(ctx, "kind", "export", "kubeconfig", "--name", name); err != nil {
+		return fmt.Errorf("could not export kubeconfig for kind cluster %q: %w", name, err)
+	}
+	return nil
+}
+
 // List implements Provider.
 func (k *Kind) List(ctx context.Context) ([]string, error) {
 	r := runner.New(nil)

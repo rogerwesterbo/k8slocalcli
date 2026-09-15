@@ -138,9 +138,19 @@ func cniLabel(c cluster.CNI) string {
 }
 
 // talosCNIPatch returns the Talos machine-config patch that disables the default
-// CNI (and, for Cilium, kube-proxy, which Cilium replaces). Matches the
-// createlocalk8s talos provider behaviour.
-func talosCNIPatch(cni cluster.CNI) string {
+// CNI (and, for Cilium, kube-proxy, which Cilium replaces). talosMajorMinor is
+// the installed talosctl version: Talos 1.14 moved these settings out of the
+// v1alpha1 document into the KubeFlannelCNIConfig/KubeProxyConfig documents and
+// rejects the legacy cluster.network/cluster.proxy fields alongside them.
+func talosCNIPatch(cni cluster.CNI, talosMajorMinor string) string {
+	if talosAtLeast(talosMajorMinor, 1, 14) {
+		patch := "apiVersion: v1alpha1\nkind: KubeFlannelCNIConfig\n$patch: delete\n"
+		if cni == cluster.CNICilium {
+			patch += "---\napiVersion: v1alpha1\nkind: KubeProxyConfig\nenabled: false\n"
+		}
+		return patch
+	}
+
 	patch := "cluster:\n  network:\n    cni:\n      name: none\n"
 	if cni == cluster.CNICilium {
 		patch += "  proxy:\n    disabled: true\n"

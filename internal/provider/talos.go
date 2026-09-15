@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -62,16 +63,14 @@ func stateDir() (string, error) {
 
 // Create implements Provider.
 func (t *Talos) Create(ctx context.Context, spec cluster.Spec, out io.Writer) error {
-	r := runner.New(out)
-
 	state, err := stateDir()
 	if err != nil {
 		return fmt.Errorf("preparing talos state directory: %w", err)
 	}
 
+	mm := t.majorMinor(ctx)
 	version := spec.K8sVersion
 	if version == "" {
-		mm := t.majorMinor(ctx)
 		version = talosK8sVersionsFor(mm)[0]
 	}
 	version = strings.TrimPrefix(version, "v")
@@ -97,14 +96,14 @@ func (t *Talos) Create(ctx context.Context, spec cluster.Spec, out io.Writer) er
 	}
 
 	// For a custom CNI, disable Talos's default CNI (and kube-proxy for Cilium)
-	// via a machine-config patch.
+	// via a machine-config patch whose shape depends on the talosctl version.
 	if spec.CNI.Custom() {
 		patchFile, err := os.CreateTemp("", "talos-cni-patch-*.yaml")
 		if err != nil {
 			return fmt.Errorf("creating talos CNI patch: %w", err)
 		}
 		defer func() { _ = os.Remove(patchFile.Name()) }()
-		if _, err := patchFile.WriteString(talosCNIPatch(spec.CNI)); err != nil {
+		if _, err := patchFile.WriteString(talosCNIPatch(spec.CNI, mm)); err != nil {
 			_ = patchFile.Close()
 			return fmt.Errorf("writing talos CNI patch: %w", err)
 		}
@@ -118,15 +117,9 @@ func (t *Talos) Create(ctx context.Context, spec cluster.Spec, out io.Writer) er
 		return fmt.Errorf("could not create talos cluster: %w", err)
 	}
 
-	// Merge the kubeconfig, then rewrite its server URL. talosctl records the
-	// control-plane's internal Docker IP (e.g. https://10.5.0.2:6443), which is
-	// not routable from the host on macOS/Windows. The Docker backend forwards
-	// the API server (6443) to a localhost port, so we point kubeconfig there.
 	fmt.Fprintf(out, "\n⏰ Merging kubeconfig\n")
-	if err := r.Run(ctx, "talosctl", "kubeconfig", "--cluster", spec.Name, "--nodes", "127.0.0.1", "--force"); err != nil {
-		fmt.Fprintf(out, "⚠️  Could not merge kubeconfig automatically: %v\n", err)
-	} else if err := fixKubeconfigServer(ctx, r, spec.Name, out); err != nil {
-		fmt.Fprintf(out, "⚠️  Could not point kubeconfig at the host port (kubectl may time out): %v\n", err)
+	if err := t.MergeKubeconfig(ctx, spec.Name, out); err != nil {
+		fmt.Fprintf(out, "⚠️  Could not merge kubeconfig automatically (kubectl may not reach the cluster): %v\n", err)
 	}
 
 	// Install the chosen CNI now that the API server is reachable; this is what
@@ -201,22 +194,116 @@ func (t *Talos) apiReachable(ctx context.Context, name string) bool {
 	path := tmp.Name()
 	_ = tmp.Close()
 	defer func() { _ = os.Remove(path) }()
-	return runner.New(nil).Run(ctx, "talosctl", "kubeconfig", path,
-		"--cluster", name, "--nodes", "127.0.0.1", "--force") == nil
+	return runner.New(nil).Run(ctx, "talosctl", t.kubeconfigArgs(ctx, name, path, "--force")...) == nil
 }
 
-// fixKubeconfigServer rewrites the cluster's API server URL in the active
-// kubeconfig to the host-mapped port. talosctl records the control-plane's
-// internal Docker IP, which the host cannot reach; the Docker backend forwards
-// the API server (6443) to a localhost port instead.
-func fixKubeconfigServer(ctx context.Context, r *runner.Runner, name string, out io.Writer) error {
+// Kubeconfig implements Provider. It downloads the admin kubeconfig into a
+// temporary file and rewrites its server URL to the host-mapped port (see
+// fixKubeconfigServer) so the result works from the host.
+func (t *Talos) Kubeconfig(ctx context.Context, name string) ([]byte, error) {
+	tmp, err := os.CreateTemp("", "talos-*.kubeconfig")
+	if err != nil {
+		return nil, fmt.Errorf("creating temporary kubeconfig: %w", err)
+	}
+	path := tmp.Name()
+	_ = tmp.Close()
+	defer func() { _ = os.Remove(path) }()
+
+	r := runner.New(nil)
+	if err := r.Run(ctx, "talosctl", t.kubeconfigArgs(ctx, name, path, "--merge=false", "--force")...); err != nil {
+		return nil, fmt.Errorf("could not get kubeconfig for talos cluster %q: %w", name, err)
+	}
+	if err := fixKubeconfigServer(ctx, r, name, path, io.Discard); err != nil {
+		return nil, fmt.Errorf("could not point kubeconfig at the host port: %w", err)
+	}
+	cfg, err := os.ReadFile(path) // #nosec G304 -- path is our own temp file from os.CreateTemp
+	if err != nil {
+		return nil, fmt.Errorf("reading kubeconfig: %w", err)
+	}
+	return cfg, nil
+}
+
+// MergeKubeconfig implements Provider. talosctl merges the admin kubeconfig into
+// the default kubeconfig; the server URL is then rewritten to the host-mapped
+// port and the cluster's context made current.
+func (t *Talos) MergeKubeconfig(ctx context.Context, name string, out io.Writer) error {
+	r := runner.New(out)
+	if err := r.Run(ctx, "talosctl", t.kubeconfigArgs(ctx, name, "", "--force")...); err != nil {
+		return fmt.Errorf("could not merge kubeconfig for talos cluster %q: %w", name, err)
+	}
+	if err := fixKubeconfigServer(ctx, r, name, "", out); err != nil {
+		return fmt.Errorf("could not point kubeconfig at the host port: %w", err)
+	}
+	if err := r.Run(ctx, "kubectl", "config", "use-context", t.Context(name)); err != nil {
+		return fmt.Errorf("could not switch kubectl context: %w", err)
+	}
+	return nil
+}
+
+// kubeconfigArgs builds a `talosctl kubeconfig` invocation for the cluster,
+// writing to localPath (empty = merge into the default kubeconfig). When the
+// talosconfig has a context named after the cluster (talosctl cluster create
+// names it so) it is selected explicitly; otherwise talosctl's current context
+// is used, which is the most recently created cluster.
+func (t *Talos) kubeconfigArgs(ctx context.Context, name, localPath string, extra ...string) []string {
+	args := []string{"kubeconfig"}
+	if localPath != "" {
+		args = append(args, localPath)
+	}
+	args = append(args, "--cluster", name, "--nodes", "127.0.0.1")
+	if t.hasTalosContext(ctx, name) {
+		args = append(args, "--context", name)
+	}
+	return append(args, extra...)
+}
+
+// hasTalosContext reports whether the talosconfig contains a context named name.
+func (t *Talos) hasTalosContext(ctx context.Context, name string) bool {
+	out, err := runner.New(nil).Capture(ctx, "talosctl", "config", "contexts")
+	if err != nil {
+		return false
+	}
+	return slices.Contains(parseTalosContexts(out), name)
+}
+
+// parseTalosContexts extracts the context names from `talosctl config contexts`
+// output, a table with a CURRENT column ("*" on the active row) then NAME.
+func parseTalosContexts(out string) []string {
+	var names []string
+	for i, line := range nonEmptyLines(out) {
+		if i == 0 && strings.HasPrefix(line, "CURRENT") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == "*" {
+			fields = fields[1:]
+		}
+		if len(fields) > 0 {
+			names = append(names, fields[0])
+		}
+	}
+	return names
+}
+
+// fixKubeconfigServer rewrites the cluster's API server URL in a kubeconfig to
+// the host-mapped port. talosctl records the control-plane's internal Docker IP
+// (e.g. https://10.5.0.2:6443), which the host cannot reach on macOS/Windows;
+// the Docker backend forwards the API server (6443) to a localhost port
+// instead. kubeconfigPath selects the file to edit (empty = the default).
+func fixKubeconfigServer(ctx context.Context, r *runner.Runner, name, kubeconfigPath string, out io.Writer) error {
 	port, err := dockerHostPort(ctx, name+"-controlplane-1", "6443")
 	if err != nil {
 		return err
 	}
 	server := fmt.Sprintf("https://127.0.0.1:%s", port)
 	fmt.Fprintf(out, "🔧 Pointing kubeconfig cluster %q at %s\n", name, server)
-	return r.Run(ctx, "kubectl", "config", "set-cluster", name, "--server="+server)
+
+	var args []string
+	if kubeconfigPath != "" {
+		args = append(args, "--kubeconfig", kubeconfigPath)
+	}
+	args = append(args, "config", "set-cluster", name, "--server="+server)
+	return r.Run(ctx, "kubectl", args...)
 }
 
 // dockerHostPort returns the host port mapped to containerPort/tcp on the named

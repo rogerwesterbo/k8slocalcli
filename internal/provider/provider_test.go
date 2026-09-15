@@ -94,19 +94,83 @@ func TestKindConfigCustomCNI(t *testing.T) {
 	}
 }
 
-func TestTalosCNIPatch(t *testing.T) {
+func TestTalosCNIPatchLegacy(t *testing.T) {
+	// Before 1.14: v1alpha1 cluster.network/cluster.proxy fields.
 	// Cilium replaces kube-proxy, so the patch disables both CNI and proxy.
-	cilium := talosCNIPatch(cluster.CNICilium)
+	cilium := talosCNIPatch(cluster.CNICilium, "1.13")
 	if !strings.Contains(cilium, "name: none") || !strings.Contains(cilium, "disabled: true") {
 		t.Errorf("cilium patch should disable cni and proxy:\n%s", cilium)
 	}
+	if strings.Contains(cilium, "kind:") {
+		t.Errorf("pre-1.14 patch must not use multi-document kinds:\n%s", cilium)
+	}
 	// Calico keeps kube-proxy, so the patch only disables the CNI.
-	calico := talosCNIPatch(cluster.CNICalico)
+	calico := talosCNIPatch(cluster.CNICalico, "1.13")
 	if !strings.Contains(calico, "name: none") {
 		t.Errorf("calico patch should disable cni:\n%s", calico)
 	}
 	if strings.Contains(calico, "proxy") {
 		t.Errorf("calico patch should not disable kube-proxy:\n%s", calico)
+	}
+}
+
+func TestTalosCNIPatchMultiDoc(t *testing.T) {
+	// 1.14+ (and unknown/newer versions): delete the Flannel document and, for
+	// Cilium, disable kube-proxy via KubeProxyConfig. The legacy v1alpha1 fields
+	// are rejected alongside these documents.
+	for _, mm := range []string{"1.14", "1.15", "2.0", ""} {
+		cilium := talosCNIPatch(cluster.CNICilium, mm)
+		if !strings.Contains(cilium, "kind: KubeFlannelCNIConfig\n$patch: delete") {
+			t.Errorf("[%s] cilium patch should delete KubeFlannelCNIConfig:\n%s", mm, cilium)
+		}
+		if !strings.Contains(cilium, "kind: KubeProxyConfig\nenabled: false") {
+			t.Errorf("[%s] cilium patch should disable kube-proxy:\n%s", mm, cilium)
+		}
+		if strings.Contains(cilium, "cluster:") {
+			t.Errorf("[%s] cilium patch must not set legacy v1alpha1 fields:\n%s", mm, cilium)
+		}
+
+		calico := talosCNIPatch(cluster.CNICalico, mm)
+		if !strings.Contains(calico, "kind: KubeFlannelCNIConfig\n$patch: delete") {
+			t.Errorf("[%s] calico patch should delete KubeFlannelCNIConfig:\n%s", mm, calico)
+		}
+		if strings.Contains(calico, "KubeProxyConfig") || strings.Contains(calico, "cluster:") {
+			t.Errorf("[%s] calico patch should only remove flannel:\n%s", mm, calico)
+		}
+	}
+}
+
+func TestParseTalosContexts(t *testing.T) {
+	out := "CURRENT   NAME     ENDPOINTS         NODES\n" +
+		"          demo     127.0.0.1:50001   127.0.0.1\n" +
+		"*         dev      127.0.0.1:50000   \n"
+	got := parseTalosContexts(out)
+	if len(got) != 2 || got[0] != "demo" || got[1] != "dev" {
+		t.Errorf("parseTalosContexts = %v, want [demo dev]", got)
+	}
+	if got := parseTalosContexts("CURRENT   NAME   ENDPOINTS   NODES\n"); len(got) != 0 {
+		t.Errorf("expected no contexts from header-only output, got %v", got)
+	}
+}
+
+func TestTalosAtLeast(t *testing.T) {
+	cases := []struct {
+		mm   string
+		want bool
+	}{
+		{"1.13", false},
+		{"1.8", false},
+		{"0.99", false},
+		{"1.14", true},
+		{"1.20", true},
+		{"2.0", true},
+		{"", true},
+		{"garbage", true},
+	}
+	for _, c := range cases {
+		if got := talosAtLeast(c.mm, 1, 14); got != c.want {
+			t.Errorf("talosAtLeast(%q, 1, 14) = %v, want %v", c.mm, got, c.want)
+		}
 	}
 }
 
@@ -131,6 +195,9 @@ func TestParseTalosMajorMinor(t *testing.T) {
 	out := "Client:\n\tTag:         v1.13.3\n\tSHA:         undefined\n"
 	if got := parseTalosMajorMinor(out); got != "1.13" {
 		t.Errorf("parseTalosMajorMinor = %q, want 1.13", got)
+	}
+	if got := parseTalosMajorMinor("Client:\n\tTag:         v1.14.1\n"); got != "1.14" {
+		t.Errorf("parseTalosMajorMinor = %q, want 1.14", got)
 	}
 	if got := parseTalosMajorMinor("no version here"); got != "" {
 		t.Errorf("expected empty result, got %q", got)
@@ -169,11 +236,14 @@ func TestParseHostPort(t *testing.T) {
 }
 
 func TestTalosK8sVersionsFor(t *testing.T) {
+	if v := talosK8sVersionsFor("1.14"); len(v) == 0 || v[0] != "1.37.0" {
+		t.Errorf("talos 1.14 versions unexpected: %v", v)
+	}
 	if v := talosK8sVersionsFor("1.13"); len(v) == 0 || v[0] != "1.36.1" {
 		t.Errorf("talos 1.13 versions unexpected: %v", v)
 	}
 	// Unknown version falls back to the latest set.
-	if v := talosK8sVersionsFor("99.99"); len(v) == 0 {
-		t.Error("expected fallback versions for unknown talos version")
+	if v := talosK8sVersionsFor("99.99"); len(v) == 0 || v[0] != talosK8sVersions["1.14"][0] {
+		t.Errorf("expected newest fallback versions for unknown talos version, got %v", v)
 	}
 }

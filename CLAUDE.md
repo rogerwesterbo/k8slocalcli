@@ -58,10 +58,13 @@ Understanding these four seams is enough to be productive:
   focused field index. It returns a `cluster.Spec` and never creates clusters
   itself.
 
-- **`internal/cli` (`root.go`)** — cobra tree (`create`/`list`/`delete`).
-  `create` launches the TUI **only when `--name` is empty**; otherwise it runs
-  non-interactively from flags. `delete` auto-detects the owning provider by
-  asking each `Provider.Exists`. `list`/`delete` degrade gracefully when Docker
+- **`internal/cli` (`root.go`, `kubeconfig.go`)** — cobra tree
+  (`create`/`list`/`delete`/`kubeconfig`). `create` launches the TUI **only when
+  `--name` is empty**; otherwise it runs non-interactively from flags. `delete`
+  and `kubeconfig` auto-detect the owning provider by asking each
+  `Provider.Exists` (or show a picker with no name). `kubeconfig` prints
+  `Provider.Kubeconfig` to stdout, writes it with `--output`, or calls
+  `Provider.MergeKubeconfig` with `--merge`. `list`/`delete` degrade gracefully when Docker
   is down.
 
 ## Provider-specific gotchas
@@ -73,7 +76,10 @@ Understanding these four seams is enough to be productive:
   on the *first* control-plane node only (`kindContext`/`kindConfig`).
 - **CNI** (`internal/provider/cni.go`): default keeps the provider's built-in CNI.
   Cilium/Calico disable it (kind `disableDefaultCNI`; Talos machine-config patch
-  from `talosCNIPatch`) and install via Helm with per-provider values ported from
+  from `talosCNIPatch`, version-dependent: talosctl 1.14+ deletes the
+  `KubeFlannelCNIConfig` doc and sets `KubeProxyConfig enabled: false`, older
+  versions use the legacy `cluster.network.cni`/`cluster.proxy` fields that
+  1.14 rejects) and install via Helm with per-provider values ported from
   `createlocalk8s/scripts/installers/helm.sh`. Talos disables kube-proxy only for
   Cilium (which replaces it). With a custom CNI on **Talos**, `talosctl cluster
   create` would block forever (health checks need Ready nodes), so

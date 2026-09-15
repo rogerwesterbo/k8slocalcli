@@ -1,5 +1,7 @@
 package provider
 
+import "fmt"
+
 // kindNodeImages maps a Kubernetes version to the pinned kindest/node image
 // (including digest) known to work with kind. The first entry is the default.
 // Source: createlocalk8s/scripts/variables.sh — keep in sync with kind releases.
@@ -40,8 +42,10 @@ func kindImageFor(version string) (image string, resolvedVersion string, ok bool
 
 // talosK8sVersions maps a talosctl major.minor version to the list of supported
 // Kubernetes versions, newest first. Source: Talos support matrix
-// https://docs.siderolabs.com/talos/v1.13/getting-started/support-matrix
+// https://docs.siderolabs.com/talos/v1.14/getting-started/support-matrix
+// (1.37.0 is the default of talosctl v1.14.1).
 var talosK8sVersions = map[string][]string{
+	"1.14": {"1.37.0", "1.36.1", "1.35.5", "1.34.8", "1.33.12"},
 	"1.13": {"1.36.1", "1.35.5", "1.34.8", "1.33.12", "1.32.13", "1.31.14"},
 	"1.12": {"1.35.4", "1.34.1", "1.33.1", "1.32.3", "1.31.6", "1.30.10"},
 	"1.11": {"1.34.1", "1.33.1", "1.32.3", "1.31.6", "1.30.10", "1.29.14"},
@@ -52,7 +56,7 @@ var talosK8sVersions = map[string][]string{
 
 // talosLatestK8sVersions is used when the installed talosctl version is not in
 // the support matrix above.
-var talosLatestK8sVersions = []string{"1.36.1", "1.35.5", "1.34.8", "1.33.12", "1.32.13", "1.31.14"}
+var talosLatestK8sVersions = []string{"1.37.0", "1.36.1", "1.35.5", "1.34.8", "1.33.12"}
 
 // talosK8sVersionsFor returns the supported Kubernetes versions for a talosctl
 // major.minor version, falling back to the latest known set.
@@ -61,4 +65,18 @@ func talosK8sVersionsFor(majorMinor string) []string {
 		return v
 	}
 	return talosLatestK8sVersions
+}
+
+// talosAtLeast reports whether a talosctl "major.minor" version is at least
+// major.minor. An empty or unparsable version counts as the newest: it usually
+// means a talosctl release newer than this table knows about.
+func talosAtLeast(majorMinor string, major, minor int) bool {
+	var ma, mi int
+	if _, err := fmt.Sscanf(majorMinor, "%d.%d", &ma, &mi); err != nil {
+		return true
+	}
+	if ma != major {
+		return ma > major
+	}
+	return mi >= minor
 }
