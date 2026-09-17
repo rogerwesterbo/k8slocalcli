@@ -247,3 +247,35 @@ func TestTalosK8sVersionsFor(t *testing.T) {
 		t.Errorf("expected newest fallback versions for unknown talos version, got %v", v)
 	}
 }
+
+// Calico v3.32 stopped shipping the crd.projectcalico.org and operator.tigera.io
+// CRDs inside the tigera-operator chart. The chart's templates still render
+// Installation/APIServer/Goldmane/Whisker custom resources, so installing the
+// operator chart without applying those CRDs first fails with
+// "no matches for kind ... ensure CRDs are installed first".
+func TestCalicoCRDTemplateArgs(t *testing.T) {
+	args := calicoCRDTemplateArgs()
+	joined := strings.Join(args, " ")
+	if args[0] != "template" {
+		t.Errorf("CRDs must be rendered with `helm template`, got %q", joined)
+	}
+	if !strings.Contains(joined, calicoCRDChart) {
+		t.Errorf("CRD render must use the %s chart, got %q", calicoCRDChart, joined)
+	}
+}
+
+// Some Calico CRDs exceed the client-side apply annotation size limit, so the
+// manifest has to be applied server-side.
+func TestCalicoCRDApplyArgs(t *testing.T) {
+	args := calicoCRDApplyArgs("kind-test", "/tmp/crds.yaml")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--server-side") {
+		t.Errorf("CRDs must be applied server-side, got %q", joined)
+	}
+	if !strings.Contains(joined, "--context kind-test") {
+		t.Errorf("apply must target the cluster context, got %q", joined)
+	}
+	if !strings.Contains(joined, "-f /tmp/crds.yaml") {
+		t.Errorf("apply must reference the rendered manifest, got %q", joined)
+	}
+}

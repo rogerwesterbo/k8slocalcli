@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 
 	"github.com/rogerwesterbo/k8slocalcli/internal/cluster"
 	"github.com/rogerwesterbo/k8slocalcli/internal/runner"
@@ -95,6 +96,13 @@ func installCalico(ctx context.Context, r *runner.Runner, prov cluster.Provider,
 		return fmt.Errorf("adding calico helm repo: %w", err)
 	}
 
+	// Calico v3.32 removed the CRDs from the tigera-operator chart (it has no
+	// crds/ directory), but its templates still render operator.tigera.io
+	// custom resources. They must exist before the operator chart is installed.
+	if err := installCalicoCRDs(ctx, r, kubeContext, out); err != nil {
+		return err
+	}
+
 	args := []string{
 		"upgrade", "--install", "calico", "projectcalico/tigera-operator",
 		"--kube-context", kubeContext,
@@ -113,6 +121,53 @@ func installCalico(ctx context.Context, r *runner.Runner, prov cluster.Provider,
 	if err := r.Run(ctx, "kubectl", "--context", kubeContext, "rollout", "status",
 		"daemonset/calico-node", "-n", "calico-system", "--timeout=240s"); err != nil {
 		fmt.Fprintf(out, "⚠️  Calico node daemonset not ready yet; it may still be coming up\n")
+	}
+	return nil
+}
+
+// calicoCRDChart ships the crd.projectcalico.org and operator.tigera.io CRDs.
+// As of Calico v3.32 these are no longer bundled in the tigera-operator chart
+// and must be installed (and upgraded) separately.
+const calicoCRDChart = "projectcalico/crd.projectcalico.org.v1"
+
+// calicoCRDTemplateArgs renders the CRD chart locally. Upstream renders rather
+// than installs it because Helm neither upgrades nor deletes CRDs that live in
+// a chart's crds/ directory.
+func calicoCRDTemplateArgs() []string {
+	return []string{"template", "calico-crds", calicoCRDChart}
+}
+
+// calicoCRDApplyArgs applies the rendered manifest. Server-side apply is
+// required: some Calico CRDs exceed the size limit for client-side apply.
+func calicoCRDApplyArgs(kubeContext, path string) []string {
+	return []string{"--context", kubeContext, "apply", "--server-side", "-f", path}
+}
+
+// installCalicoCRDs renders the Calico CRD chart and applies it to the cluster.
+func installCalicoCRDs(ctx context.Context, r *runner.Runner, kubeContext string, out io.Writer) error {
+	fmt.Fprintf(out, "\n📦 Installing Calico CRDs (%s)\n", calicoCRDChart)
+
+	// Rendered quietly: the manifest is several thousand lines of CRD YAML.
+	manifest, err := runner.New(nil).Capture(ctx, "helm", calicoCRDTemplateArgs()...)
+	if err != nil {
+		return fmt.Errorf("rendering calico CRDs: %w", err)
+	}
+
+	f, err := os.CreateTemp("", "calico-crds-*.yaml")
+	if err != nil {
+		return fmt.Errorf("creating calico CRD manifest: %w", err)
+	}
+	defer func() { _ = os.Remove(f.Name()) }()
+	if _, err := f.WriteString(manifest); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("writing calico CRD manifest: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("closing calico CRD manifest: %w", err)
+	}
+
+	if err := r.Run(ctx, "kubectl", calicoCRDApplyArgs(kubeContext, f.Name())...); err != nil {
+		return fmt.Errorf("applying calico CRDs: %w", err)
 	}
 	return nil
 }
