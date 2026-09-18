@@ -29,7 +29,7 @@ version adds a typed, testable codebase and an interactive TUI.
 - [`kubectl`](https://kubernetes.io/docs/tasks/tools/) — to talk to the cluster.
 - For the **kind** provider: [`kind`](https://kind.sigs.k8s.io/).
 - For the **talos** provider: [`talosctl`](https://www.talos.dev/) (`brew install siderolabs/tap/talosctl`).
-- For the **Cilium**/**Calico** CNIs: [`helm`](https://helm.sh/) (not needed for the default CNI).
+- For the **Cilium**/**Calico**/**Kube-OVN** CNIs: [`helm`](https://helm.sh/) (not needed for the default CNI).
 
 Each provider checks its own prerequisites before doing anything and prints
 install hints if a tool is missing.
@@ -59,7 +59,7 @@ You'll get a form:
 | Control planes     | `←` / `→` to adjust, or type a number                |
 | Workers            | `←` / `→` to adjust, or type a number                |
 | Kubernetes version | `←` / `→` to cycle versions (defaults to latest)     |
-| CNI                | `←` / `→` to choose **default** / **cilium** / **calico** |
+| CNI                | `←` / `→` to choose **default** / **cilium** / **calico** / **kube-ovn** |
 
 `↑`/`↓` or `Tab` move between fields. `Enter` advances to the next field; on the
 **Create** button it builds the cluster. There are explicit **Create** and
@@ -67,8 +67,8 @@ You'll get a form:
 at any time.
 
 The version list is provider-specific; switching provider resets it to that
-provider's latest version. Cilium/Calico are installed via Helm, so `helm` must
-be on your PATH when choosing them.
+provider's latest version. Cilium/Calico/Kube-OVN are installed via Helm, so
+`helm` must be on your PATH when choosing them.
 
 ### Non-interactive (flags)
 
@@ -86,6 +86,9 @@ k8slocalcli create --name dev --k8s-version v1.33.12 --http-port 8080 --https-po
 
 # use Cilium instead of the default CNI
 k8slocalcli create --name dev --cni cilium
+
+# use Kube-OVN instead of the default CNI
+k8slocalcli create --name dev --cni kube-ovn
 ```
 
 Flags:
@@ -96,7 +99,7 @@ Flags:
 --control-planes   number of control planes         (default 1)
 --workers          number of workers                (default 0)
 --k8s-version      Kubernetes version               (default: provider's newest)
---cni              default | cilium | calico         (default default)
+--cni              default | cilium | calico | kube-ovn  (default default)
 --http-port        host port mapped to ingress :80  (default 80)
 --https-port       host port mapped to ingress :443 (default 443)
 ```
@@ -145,13 +148,43 @@ The provider is auto-detected like `delete`. `kubeconfig` is aliased to `kc`;
   matrix for your installed `talosctl` (Talos 1.14 → Kubernetes 1.37.0, with
   1.33–1.37 selectable).
 - **CNI**: the default keeps the provider's built-in CNI (kindnet for kind,
-  Flannel for Talos). Choosing **Cilium** or **Calico** disables the default CNI
-  (via the kind config / a Talos machine-config patch) and installs the chosen
-  one with Helm using the values ported from `createlocalk8s`. On Talos 1.14+
-  the patch deletes the `KubeFlannelCNIConfig` document (and sets
-  `KubeProxyConfig` `enabled: false` for Cilium); older `talosctl` versions get
-  the legacy `cluster.network.cni` / `cluster.proxy` patch, which 1.14 rejects. With a custom CNI,
+  Flannel for Talos). Choosing **Cilium**, **Calico** or **Kube-OVN** disables
+  the default CNI (via the kind config / a Talos machine-config patch) and
+  installs the chosen one with Helm using the values ported from
+  `createlocalk8s`. On Talos 1.14+ the patch deletes the `KubeFlannelCNIConfig`
+  document (and sets `KubeProxyConfig` `enabled: false` for Cilium); older
+  `talosctl` versions get the legacy `cluster.network.cni` / `cluster.proxy`
+  patch, which 1.14 rejects. With a custom CNI,
   nodes stay `NotReady` until it finishes installing — this is expected.
+- **Kube-OVN**: control-plane nodes are labelled `kube-ovn/role=master` before
+  the Helm install, because the chart resolves the `ovn-central` members with a
+  `lookup` over that label and fails to render without it. The pod/service
+  CIDRs are passed explicitly to match each provider (kind is dual-stack
+  `10.244.0.0/16,fd00:10:244::/56` + `10.96.0.0/16,fd00:10:96::/112`; the
+  talosctl Docker backend is IPv4-only `10.244.0.0/16` + `10.96.0.0/12`).
+  Kube-proxy stays enabled — Kube-OVN does not replace it.
+
+  > On **Talos** the chart is installed with the upstream Talos settings
+  > (`/var/lib` host paths and `DISABLE_MODULES_MANAGEMENT=true`) because Talos
+  > has a read-only rootfs. Talos nodes in Docker cannot load kernel modules
+  > themselves, so `ovs-ovn` needs the `openvswitch` module already loaded on
+  > the Docker host. kind nodes bind-mount `/lib/modules` and load it
+  > themselves, so kind needs nothing extra.
+- **Several clusters at once**: clusters run side by side in Docker. kind puts
+  them all on the shared `kind` network and Docker picks a random host port per
+  API server, so the only thing that cannot be shared is the ingress host ports.
+  They are resolved *before* creation starts (kind would otherwise pull the node
+  image and start every node before Docker rejects the bind, then roll the
+  cluster back):
+  - a port left at its default that is taken moves to the next free fallback —
+    `80` → `8080` → `8081`…, `443` → `8443` → `8444`… — and the new port is
+    printed, so a second cluster needs no flags;
+  - a port you passed explicitly is never moved: that is an error, since
+    publishing on a port you did not ask for is worse than failing.
+
+  For **talos** the Docker network subnet also collides — every Talos cluster
+  defaults to `10.5.0.0/24` and Docker refuses overlapping pools — so a free
+  `10.5.x.0/24` is passed to `talosctl --subnet` when the default is in use.
 - **No workers**: when a cluster has 0 workers, the control-plane `NoSchedule`
   taint is removed so workloads can run on it.
 

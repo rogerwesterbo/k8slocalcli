@@ -279,3 +279,146 @@ func TestCalicoCRDApplyArgs(t *testing.T) {
 		t.Errorf("apply must reference the rendered manifest, got %q", joined)
 	}
 }
+
+// Kube-OVN runs its own IPAM and programs OVN load balancers from the configured
+// CIDRs, so they must match what each provider actually built the cluster with:
+// kind is dual-stack (kindConfig sets ipFamily: dual), the talosctl Docker
+// backend is single-stack IPv4 with a /12 service subnet.
+func TestKubeOVNValuesCIDRsMatchProvider(t *testing.T) {
+	kindValues := strings.Join(kubeOVNValues(cluster.ProviderKind), " ")
+	for _, want := range []string{
+		"networking.NET_STACK=dual_stack",
+		`dual_stack.POD_CIDR=10.244.0.0/16\,fd00:10:244::/56`,
+		`dual_stack.SVC_CIDR=10.96.0.0/16\,fd00:10:96::/112`,
+	} {
+		if !strings.Contains(kindValues, want) {
+			t.Errorf("kind kube-ovn values missing %q:\n%s", want, kindValues)
+		}
+	}
+
+	talosValues := strings.Join(kubeOVNValues(cluster.ProviderTalos), " ")
+	for _, want := range []string{
+		"networking.NET_STACK=ipv4",
+		"ipv4.POD_CIDR=10.244.0.0/16",
+		"ipv4.SVC_CIDR=10.96.0.0/12",
+	} {
+		if !strings.Contains(talosValues, want) {
+			t.Errorf("talos kube-ovn values missing %q:\n%s", want, talosValues)
+		}
+	}
+	if strings.Contains(talosValues, "dual_stack") {
+		t.Errorf("talos docker backend is single-stack; got:\n%s", talosValues)
+	}
+}
+
+// Talos has a read-only rootfs, so the chart's default /etc/origin host paths
+// cannot be created and the node cannot load kernel modules itself. These are
+// the settings upstream documents for Talos in charts/kube-ovn/README.md.
+func TestKubeOVNValuesTalosReadOnlyRootfs(t *testing.T) {
+	values := strings.Join(kubeOVNValues(cluster.ProviderTalos), " ")
+	for _, want := range []string{
+		"OPENVSWITCH_DIR=/var/lib/openvswitch",
+		"OVN_DIR=/var/lib/ovn",
+		"OVN_IPSEC_KEY_DIR=/var/lib/ovs_ipsec_keys",
+		"DISABLE_MODULES_MANAGEMENT=true",
+		"cni_conf.MOUNT_LOCAL_BIN_DIR=false",
+	} {
+		if !strings.Contains(values, want) {
+			t.Errorf("talos kube-ovn values missing %q:\n%s", want, values)
+		}
+	}
+
+	// kind nodes have a writable rootfs and bind-mount /lib/modules, so they
+	// must keep the chart defaults.
+	kindValues := strings.Join(kubeOVNValues(cluster.ProviderKind), " ")
+	if strings.Contains(kindValues, "DISABLE_MODULES_MANAGEMENT") {
+		t.Errorf("kind must let kube-ovn manage modules:\n%s", kindValues)
+	}
+}
+
+// The chart resolves ovn-central's members with a Helm `lookup` over nodes
+// carrying kube-ovn/role=master and fails the render when none do, so the label
+// has to be applied before `helm upgrade --install` runs.
+func TestKubeOVNMasterLabelArgs(t *testing.T) {
+	joined := strings.Join(kubeOVNMasterLabelArgs("kind-test"), " ")
+	if !strings.Contains(joined, kubeOVNMasterRole) {
+		t.Errorf("label must set %s, got %q", kubeOVNMasterRole, joined)
+	}
+	if !strings.Contains(joined, "-l node-role.kubernetes.io/control-plane") {
+		t.Errorf("label must select control-plane nodes, got %q", joined)
+	}
+	if !strings.Contains(joined, "--overwrite") {
+		t.Errorf("label must be idempotent across re-runs, got %q", joined)
+	}
+	if !strings.Contains(joined, "--context kind-test") {
+		t.Errorf("label must target the cluster context, got %q", joined)
+	}
+}
+
+// Kube-OVN does not replace kube-proxy, so the Talos patch must only remove
+// Flannel — same as Calico, unlike Cilium.
+func TestTalosCNIPatchKubeOVNKeepsKubeProxy(t *testing.T) {
+	for _, mm := range []string{"1.13", "1.14", "1.15", ""} {
+		patch := talosCNIPatch(cluster.CNIKubeOVN, mm)
+		if strings.Contains(patch, "KubeProxyConfig") || strings.Contains(patch, "proxy") {
+			t.Errorf("[%s] kube-ovn patch must not disable kube-proxy:\n%s", mm, patch)
+		}
+	}
+}
+
+// A second cluster must be creatable without flags, so a defaulted port that is
+// taken moves to the recognisable fallback (80 -> 8080, 443 -> 8443).
+func TestSpecPortRequestsCarryDefaultsAndFallbacks(t *testing.T) {
+	reqs := specPortRequests(cluster.Spec{HTTPPort: 80, HTTPSPort: 443})
+	if len(reqs) != 2 {
+		t.Fatalf("both ingress ports must be resolved, got %d", len(reqs))
+	}
+	if reqs[0].Default != cluster.DefaultHTTPPort || reqs[0].Fallback != fallbackHTTPPort {
+		t.Errorf("http request wrong: %+v", reqs[0])
+	}
+	if reqs[1].Default != cluster.DefaultHTTPSPort || reqs[1].Fallback != fallbackHTTPSPort {
+		t.Errorf("https request wrong: %+v", reqs[1])
+	}
+
+	// Assign must write back to the right field.
+	spec := cluster.Spec{}
+	reqs[0].Assign(&spec, 8080)
+	reqs[1].Assign(&spec, 8443)
+	if spec.HTTPPort != 8080 || spec.HTTPSPort != 8443 {
+		t.Errorf("Assign wrote the wrong fields: %+v", spec)
+	}
+}
+
+// An explicitly chosen port is never silently moved: publishing on a different
+// port than the user asked for is worse than failing.
+func TestExplicitPortConflictErrorNamesOwnerAndFlag(t *testing.T) {
+	err := explicitPortConflictError(
+		portRequest{Port: 9090, Flag: "--http-port"}, "other-control-plane")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	for _, want := range []string{"9090", "--http-port", "other-control-plane"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("message missing %q: %s", want, err)
+		}
+	}
+}
+
+// Every Talos docker cluster defaults to 10.5.0.0/24 and Docker refuses
+// overlapping pools, so a second one has to move.
+func TestFreeTalosSubnetSkipsTakenOnes(t *testing.T) {
+	// The default being free means "pass nothing, let talosctl decide".
+	if got := pickTalosSubnet(nil); got != "" {
+		t.Errorf("free default should need no --subnet, got %q", got)
+	}
+
+	got := pickTalosSubnet([]string{talosDefaultSubnet, "172.18.0.0/16"})
+	if got != "10.5.1.0/24" {
+		t.Errorf("second cluster should get 10.5.1.0/24, got %q", got)
+	}
+
+	got = pickTalosSubnet([]string{talosDefaultSubnet, "10.5.1.0/24", "10.5.2.0/24"})
+	if got != "10.5.3.0/24" {
+		t.Errorf("fourth cluster should get 10.5.3.0/24, got %q", got)
+	}
+}

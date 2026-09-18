@@ -80,7 +80,7 @@ func newCreateCmd() *cobra.Command {
 	flags.IntVar(&spec.ControlPlanes, "control-planes", spec.ControlPlanes, "number of control plane nodes")
 	flags.IntVar(&spec.Workers, "workers", spec.Workers, "number of worker nodes")
 	flags.StringVar(&spec.K8sVersion, "k8s-version", "", "Kubernetes version (default: provider's newest)")
-	cniFlag := flags.String("cni", string(spec.CNI), "CNI: default, cilium or calico")
+	cniFlag := flags.String("cni", string(spec.CNI), "CNI: default, cilium, calico or kube-ovn")
 	flags.IntVar(&spec.HTTPPort, "http-port", spec.HTTPPort, "host port mapped to ingress :80")
 	flags.IntVar(&spec.HTTPSPort, "https-port", spec.HTTPSPort, "host port mapped to ingress :443")
 
@@ -112,6 +112,14 @@ func runCreate(ctx context.Context, spec cluster.Spec, out io.Writer) error {
 	}
 	if exists {
 		return fmt.Errorf("a %s cluster named %q already exists; delete it first or choose another name", spec.Provider, spec.Name)
+	}
+
+	// Resolved before Create because both providers publish the ingress ports on
+	// their first node: kind would otherwise pull the node image and start every
+	// node before Docker rejects the port bind, then roll the cluster back. This
+	// is what lets a second cluster be created without passing port flags.
+	if err := provider.ResolveHostPorts(ctx, &spec, out); err != nil {
+		return err
 	}
 
 	if err := p.Create(ctx, spec, out); err != nil {

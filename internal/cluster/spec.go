@@ -40,10 +40,11 @@ const (
 	CNIDefault CNI = "default"
 	CNICilium  CNI = "cilium"
 	CNICalico  CNI = "calico"
+	CNIKubeOVN CNI = "kube-ovn"
 )
 
 // CNIs is the ordered list of selectable CNIs (index 0 is the default).
-var CNIs = []CNI{CNIDefault, CNICilium, CNICalico}
+var CNIs = []CNI{CNIDefault, CNICilium, CNICalico, CNIKubeOVN}
 
 // Valid reports whether c is a known CNI.
 func (c CNI) Valid() bool {
@@ -123,7 +124,7 @@ func (s Spec) Validate() error {
 		return fmt.Errorf("unknown provider %q (supported: kind, talos)", s.Provider)
 	}
 	if s.CNI != "" && !s.CNI.Valid() {
-		return fmt.Errorf("unknown CNI %q (supported: default, cilium, calico)", s.CNI)
+		return fmt.Errorf("unknown CNI %q (supported: default, cilium, calico, kube-ovn)", s.CNI)
 	}
 	if s.ControlPlanes < 1 {
 		return fmt.Errorf("at least one control plane is required")

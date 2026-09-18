@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"github.com/rogerwesterbo/k8slocalcli/internal/cluster"
 	"github.com/rogerwesterbo/k8slocalcli/internal/runner"
@@ -30,6 +31,8 @@ func installCNI(ctx context.Context, prov cluster.Provider, cni cluster.CNI, kub
 		return installCilium(ctx, r, prov, kubeContext, out)
 	case cluster.CNICalico:
 		return installCalico(ctx, r, prov, kubeContext, out)
+	case cluster.CNIKubeOVN:
+		return installKubeOVN(ctx, r, prov, kubeContext, out)
 	default:
 		return fmt.Errorf("unsupported CNI %q", cni)
 	}
@@ -211,4 +214,139 @@ func talosCNIPatch(cni cluster.CNI, talosMajorMinor string) string {
 		patch += "  proxy:\n    disabled: true\n"
 	}
 	return patch
+}
+
+// Kube-OVN's Helm chart discovers the ovn-central members with a `lookup` over
+// nodes carrying MASTER_NODES_LABEL, and hard-fails ("No nodes found with
+// label ...") when none do. So the control planes must be labelled before the
+// install, not by it.
+const (
+	kubeOVNRepo       = "https://kubeovn.github.io/kube-ovn/"
+	kubeOVNMasterRole = "kube-ovn/role=master"
+)
+
+// kubeOVNValues returns the provider-specific `--set` arguments, flattened into
+// helm's key=value form.
+//
+// The CIDRs must match what the cluster was actually built with: Kube-OVN runs
+// its own IPAM out of POD_CIDR and programs OVN load balancers for SVC_CIDR, so
+// a mismatch with the API server's --service-cluster-ip-range silently breaks
+// service routing.
+//
+//   - kind creates dual-stack clusters (kindConfig sets ipFamily: dual) and
+//     defaults to 10.244.0.0/16,fd00:10:244::/56 for pods and
+//     10.96.0.0/16,fd00:10:96::/112 for services.
+//   - the talosctl Docker backend has no CIDR flags; Talos defaults to a
+//     single-stack 10.244.0.0/16 pod subnet and 10.96.0.0/12 service subnet.
+//
+// Commas are escaped because helm's --set parser treats them as list separators.
+func kubeOVNValues(prov cluster.Provider) []string {
+	if prov == cluster.ProviderTalos {
+		return []string{
+			"networking.NET_STACK=ipv4",
+			"ipv4.POD_CIDR=10.244.0.0/16",
+			"ipv4.POD_GATEWAY=10.244.0.1",
+			"ipv4.SVC_CIDR=10.96.0.0/12",
+			// Talos has a read-only rootfs, so the chart's /etc/origin host
+			// paths cannot be created. These five settings are the ones
+			// upstream documents for Talos (charts/kube-ovn/README.md).
+			"cni_conf.MOUNT_LOCAL_BIN_DIR=false",
+			"OPENVSWITCH_DIR=/var/lib/openvswitch",
+			"OVN_DIR=/var/lib/ovn",
+			"OVN_IPSEC_KEY_DIR=/var/lib/ovs_ipsec_keys",
+			"DISABLE_MODULES_MANAGEMENT=true",
+		}
+	}
+	return []string{
+		"networking.NET_STACK=dual_stack",
+		`dual_stack.POD_CIDR=10.244.0.0/16\,fd00:10:244::/56`,
+		`dual_stack.POD_GATEWAY=10.244.0.1\,fd00:10:244::1`,
+		`dual_stack.SVC_CIDR=10.96.0.0/16\,fd00:10:96::/112`,
+	}
+}
+
+func installKubeOVN(ctx context.Context, r *runner.Runner, prov cluster.Provider, kubeContext string, out io.Writer) error {
+	fmt.Fprintf(out, "\n📦 Installing Kube-OVN CNI via Helm\n")
+
+	if prov == cluster.ProviderTalos {
+		// Talos enforces PodSecurity; ovs-ovn and kube-ovn-cni are privileged,
+		// host-network pods in kube-system.
+		labelNamespacePrivileged(ctx, kubeContext, "kube-system", out)
+		fmt.Fprintf(out, "ℹ️  Kube-OVN needs the openvswitch kernel module. Talos nodes in Docker share the\n")
+		fmt.Fprintf(out, "   Docker host's kernel and cannot load it themselves (DISABLE_MODULES_MANAGEMENT=true),\n")
+		fmt.Fprintf(out, "   so ovs-ovn will crash-loop unless the module is already loaded on the Docker host.\n")
+	}
+
+	if err := r.Run(ctx, "helm", "repo", "add", "kubeovn", kubeOVNRepo, "--force-update"); err != nil {
+		return fmt.Errorf("adding kube-ovn helm repo: %w", err)
+	}
+
+	if err := labelKubeOVNMasters(ctx, r, kubeContext, out); err != nil {
+		return err
+	}
+
+	args := []string{
+		"upgrade", "--install", "kube-ovn", "kubeovn/kube-ovn",
+		"--kube-context", kubeContext,
+		"--namespace", "kube-system",
+		"--set", "image.pullPolicy=IfNotPresent",
+	}
+	for _, v := range kubeOVNValues(prov) {
+		args = append(args, "--set", v)
+	}
+	if err := r.Run(ctx, "helm", args...); err != nil {
+		return fmt.Errorf("installing kube-ovn: %w", err)
+	}
+
+	// Best-effort: surface readiness without failing the whole create if the
+	// rollout is merely slow (the caller's node-readiness wait is the real gate).
+	fmt.Fprintf(out, "\n⏰ Waiting for Kube-OVN to roll out\n")
+	if err := r.Run(ctx, "kubectl", "--context", kubeContext, "rollout", "status",
+		"daemonset/kube-ovn-cni", "-n", "kube-system", "--timeout=300s"); err != nil {
+		fmt.Fprintf(out, "⚠️  Kube-OVN daemonset not ready yet; it may still be coming up\n")
+	}
+	return nil
+}
+
+// kubeOVNMasterLabelArgs labels every control-plane node as an ovn-central
+// member. --overwrite keeps re-runs idempotent.
+func kubeOVNMasterLabelArgs(kubeContext string) []string {
+	return []string{
+		"--context", kubeContext, "label", "node",
+		"-l", "node-role.kubernetes.io/control-plane",
+		kubeOVNMasterRole, "--overwrite",
+	}
+}
+
+// labelKubeOVNMasters waits for the control-plane nodes to register, then
+// labels them. The wait matters on Talos: runTalosCreate returns as soon as the
+// API server answers, which can be before the node object exists.
+func labelKubeOVNMasters(ctx context.Context, r *runner.Runner, kubeContext string, out io.Writer) error {
+	fmt.Fprintf(out, "\n🏷️  Labelling control-plane nodes %s\n", kubeOVNMasterRole)
+
+	// The nodes are NotReady (no CNI yet), so we can only wait for them to exist.
+	quiet := runner.New(nil)
+	var lastErr error
+	for i := 0; i < 30; i++ {
+		names, err := quiet.Capture(ctx, "kubectl", "--context", kubeContext, "get", "nodes",
+			"-l", "node-role.kubernetes.io/control-plane", "-o", "name")
+		if err == nil && len(nonEmptyLines(names)) > 0 {
+			lastErr = nil
+			break
+		}
+		lastErr = err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
+	if lastErr != nil {
+		return fmt.Errorf("waiting for control-plane nodes to register: %w", lastErr)
+	}
+
+	if err := r.Run(ctx, "kubectl", kubeOVNMasterLabelArgs(kubeContext)...); err != nil {
+		return fmt.Errorf("labelling control-plane nodes for kube-ovn: %w", err)
+	}
+	return nil
 }

@@ -75,7 +75,7 @@ Understanding these four seams is enough to be productive:
 - **kind** puts the `ingress-ready` label and the `80`/`443` host port mappings
   on the *first* control-plane node only (`kindContext`/`kindConfig`).
 - **CNI** (`internal/provider/cni.go`): default keeps the provider's built-in CNI.
-  Cilium/Calico disable it (kind `disableDefaultCNI`; Talos machine-config patch
+  Cilium/Calico/Kube-OVN disable it (kind `disableDefaultCNI`; Talos machine-config patch
   from `talosCNIPatch`, version-dependent: talosctl 1.14+ deletes the
   `KubeFlannelCNIConfig` doc and sets `KubeProxyConfig enabled: false`, older
   versions use the legacy `cluster.network.cni`/`cluster.proxy` fields that
@@ -84,7 +84,30 @@ Understanding these four seams is enough to be productive:
   Cilium (which replaces it). With a custom CNI on **Talos**, `talosctl cluster
   create` would block forever (health checks need Ready nodes), so
   `runTalosCreate` runs it in the background and returns once `apiReachable`,
-  then the CNI install brings nodes Ready. Cilium/Calico require `helm` on PATH.
+  then the CNI install brings nodes Ready. Cilium/Calico/Kube-OVN require `helm`
+  on PATH. **Kube-OVN** additionally labels the control planes `kube-ovn/role=master`
+  *before* `helm upgrade --install` (the chart `lookup`s that label to resolve
+  ovn-central and `fail`s the render without it) and passes provider-specific
+  pod/service CIDRs from `kubeOVNValues` — they must match what the provider
+  actually built (kind: dual-stack kind defaults; talos: IPv4 `10.244.0.0/16` +
+  `10.96.0.0/12`). Talos also gets upstream's read-only-rootfs settings
+  (`/var/lib` paths, `DISABLE_MODULES_MANAGEMENT=true`), which means the Docker
+  host must already have the `openvswitch` kernel module loaded.
+- **Multi-cluster / host ports** (`internal/provider/ports.go`):
+  `ResolveHostPorts` is called from `runCreate` *before* `Provider.Create` and
+  **mutates the spec**, because both providers publish the ingress ports on their
+  first node and kind only fails after starting every node. A defaulted port that
+  is taken advances to `fallbackHTTPPort`/`fallbackHTTPSPort` and up; an
+  explicitly chosen port errors instead (never silently reassigned). It asks
+  Docker (`docker ps --filter publish=N`) rather than binding a probe socket —
+  ports below 1024 need root on macOS and would look taken. Best effort: if
+  Docker cannot be queried it returns nil and lets `CheckPrerequisites`/`Create`
+  report the real problem.
+- **Talos subnets** (`internal/provider/subnet.go`): kind shares one `kind`
+  network, but talosctl makes one network per cluster all defaulting to
+  `10.5.0.0/24`, and Docker rejects overlapping pools. `freeTalosSubnet` scans
+  allocated Docker subnets and `Talos.Create` passes `--subnet` when the default
+  is taken. `pickTalosSubnet` holds the pure logic and is the tested seam.
 - **Zero workers**: `makeControlPlaneSchedulable` (`schedule.go`) removes the
   control-plane `NoSchedule` taint so a control-plane-only cluster can run pods.
 - **Version selection**: an empty `Spec.K8sVersion` means "provider's newest" —

@@ -26,6 +26,7 @@ func TestSpecValidate(t *testing.T) {
 		{"unknown cni", func(s *Spec) { s.CNI = CNI("weave") }, true},
 		{"empty cni ok", func(s *Spec) { s.CNI = "" }, false},
 		{"cilium cni", func(s *Spec) { s.CNI = CNICilium }, false},
+		{"kube-ovn cni", func(s *Spec) { s.CNI = CNIKubeOVN }, false},
 		{"zero control planes", func(s *Spec) { s.ControlPlanes = 0 }, true},
 		{"negative workers", func(s *Spec) { s.Workers = -1 }, true},
 		{"zero workers ok", func(s *Spec) { s.Workers = 0 }, false},
@@ -64,8 +65,8 @@ func TestCNIValid(t *testing.T) {
 	if CNI("weave").Valid() {
 		t.Error("expected unknown CNI to be invalid")
 	}
-	if !CNICilium.Custom() || !CNICalico.Custom() {
-		t.Error("expected cilium and calico to be custom CNIs")
+	if !CNICilium.Custom() || !CNICalico.Custom() || !CNIKubeOVN.Custom() {
+		t.Error("expected cilium, calico and kube-ovn to be custom CNIs")
 	}
 	if CNIDefault.Custom() || CNI("").Custom() {
 		t.Error("expected default/empty CNI to not be custom")

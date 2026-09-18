@@ -95,6 +95,14 @@ func (t *Talos) Create(ctx context.Context, spec cluster.Spec, out io.Writer) er
 		"--exposed-ports", fmt.Sprintf("%d:80/tcp,%d:443/tcp", spec.HTTPPort, spec.HTTPSPort),
 	}
 
+	// Every Talos docker cluster defaults to the same 10.5.0.0/24 and Docker
+	// refuses overlapping pools, so a second cluster needs a free one.
+	if subnet := freeTalosSubnet(ctx); subnet != "" {
+		fmt.Fprintf(out, "ℹ️  %s is already in use by another Docker network; using %s\n",
+			talosDefaultSubnet, subnet)
+		args = append(args, "--subnet", subnet)
+	}
+
 	// For a custom CNI, disable Talos's default CNI (and kube-proxy for Cilium)
 	// via a machine-config patch whose shape depends on the talosctl version.
 	if spec.CNI.Custom() {
