@@ -90,9 +90,11 @@ Understanding these four seams is enough to be productive:
   ovn-central and `fail`s the render without it) and passes provider-specific
   pod/service CIDRs from `kubeOVNValues` — they must match what the provider
   actually built (kind: dual-stack kind defaults; talos: IPv4 `10.244.0.0/16` +
-  `10.96.0.0/12`). Talos also gets upstream's read-only-rootfs settings
-  (`/var/lib` paths, `DISABLE_MODULES_MANAGEMENT=true`), which means the Docker
-  host must already have the `openvswitch` kernel module loaded.
+  `10.96.0.0/12`). `DISABLE_MODULES_MANAGEMENT=true` goes to **both** providers
+  — without it `ovs-ovn` exits on `ovs-ctl load-kmod` and crash-loops while the
+  control plane looks healthy (Docker Desktop's LinuxKit kernel has openvswitch
+  built in, so there is no `.ko` to modprobe). Talos additionally gets
+  upstream's read-only-rootfs `/var/lib` paths.
 - **Multi-cluster / host ports** (`internal/provider/ports.go`):
   `ResolveHostPorts` is called from `runCreate` *before* `Provider.Create` and
   **mutates the spec**, because both providers publish the ingress ports on their

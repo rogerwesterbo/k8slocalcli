@@ -164,12 +164,14 @@ The provider is auto-detected like `delete`. `kubeconfig` is aliased to `kc`;
   talosctl Docker backend is IPv4-only `10.244.0.0/16` + `10.96.0.0/12`).
   Kube-proxy stays enabled — Kube-OVN does not replace it.
 
-  > On **Talos** the chart is installed with the upstream Talos settings
-  > (`/var/lib` host paths and `DISABLE_MODULES_MANAGEMENT=true`) because Talos
-  > has a read-only rootfs. Talos nodes in Docker cannot load kernel modules
-  > themselves, so `ovs-ovn` needs the `openvswitch` module already loaded on
-  > the Docker host. kind nodes bind-mount `/lib/modules` and load it
-  > themselves, so kind needs nothing extra.
+  > `DISABLE_MODULES_MANAGEMENT=true` is set for **both** providers. `ovs-ovn`
+  > otherwise runs `ovs-ctl load-kmod` at startup and exits when the modprobe
+  > fails, crash-looping while the control plane still looks perfectly healthy.
+  > Talos needs it because it manages modules declaratively and has a read-only
+  > rootfs (hence the `/var/lib` host paths too); kind needs it on Docker
+  > Desktop, where the shared LinuxKit kernel has `openvswitch` compiled *in* —
+  > listed in `modules.builtin` with no `.ko` to load — so the modprobe both
+  > fails and is unnecessary. OVS then comes up on the kernel datapath.
 - **Several clusters at once**: clusters run side by side in Docker. kind puts
   them all on the shared `kind` network and Docker picks a random host port per
   API server, so the only thing that cannot be shared is the ingress host ports.

@@ -223,6 +223,19 @@ func talosCNIPatch(cni cluster.CNI, talosMajorMinor string) string {
 const (
 	kubeOVNRepo       = "https://kubeovn.github.io/kube-ovn/"
 	kubeOVNMasterRole = "kube-ovn/role=master"
+
+	// ovs-ovn's startup runs `ovs-ctl load-kmod`, which modprobes openvswitch
+	// and exits when that fails — a crash loop that leaves the control plane
+	// looking perfectly healthy while no node has a dataplane.
+	//
+	// Both providers need it off, for different reasons. Talos has a read-only
+	// rootfs and manages modules declaratively. kind is the surprising one: on
+	// Docker Desktop the nodes share a LinuxKit kernel that has openvswitch
+	// (and vport-vxlan/geneve/gre) compiled *in* — they are listed in
+	// modules.builtin with no .ko to load — so the modprobe both fails and is
+	// unnecessary. With this set the chart stubs modprobe out, and OVS comes up
+	// on the kernel datapath as it should.
+	disableModulesManagement = "DISABLE_MODULES_MANAGEMENT=true"
 )
 
 // kubeOVNValues returns the provider-specific `--set` arguments, flattened into
@@ -248,17 +261,18 @@ func kubeOVNValues(prov cluster.Provider) []string {
 			"ipv4.POD_GATEWAY=10.244.0.1",
 			"ipv4.SVC_CIDR=10.96.0.0/12",
 			// Talos has a read-only rootfs, so the chart's /etc/origin host
-			// paths cannot be created. These five settings are the ones
-			// upstream documents for Talos (charts/kube-ovn/README.md).
+			// paths cannot be created. These are the settings upstream
+			// documents for Talos (charts/kube-ovn/README.md).
 			"cni_conf.MOUNT_LOCAL_BIN_DIR=false",
 			"OPENVSWITCH_DIR=/var/lib/openvswitch",
 			"OVN_DIR=/var/lib/ovn",
 			"OVN_IPSEC_KEY_DIR=/var/lib/ovs_ipsec_keys",
-			"DISABLE_MODULES_MANAGEMENT=true",
+			disableModulesManagement,
 		}
 	}
 	return []string{
 		"networking.NET_STACK=dual_stack",
+		disableModulesManagement,
 		`dual_stack.POD_CIDR=10.244.0.0/16\,fd00:10:244::/56`,
 		`dual_stack.POD_GATEWAY=10.244.0.1\,fd00:10:244::1`,
 		`dual_stack.SVC_CIDR=10.96.0.0/16\,fd00:10:96::/112`,

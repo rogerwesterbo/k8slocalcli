@@ -312,15 +312,14 @@ func TestKubeOVNValuesCIDRsMatchProvider(t *testing.T) {
 }
 
 // Talos has a read-only rootfs, so the chart's default /etc/origin host paths
-// cannot be created and the node cannot load kernel modules itself. These are
-// the settings upstream documents for Talos in charts/kube-ovn/README.md.
+// cannot be created. These are the settings upstream documents for Talos in
+// charts/kube-ovn/README.md.
 func TestKubeOVNValuesTalosReadOnlyRootfs(t *testing.T) {
 	values := strings.Join(kubeOVNValues(cluster.ProviderTalos), " ")
 	for _, want := range []string{
 		"OPENVSWITCH_DIR=/var/lib/openvswitch",
 		"OVN_DIR=/var/lib/ovn",
 		"OVN_IPSEC_KEY_DIR=/var/lib/ovs_ipsec_keys",
-		"DISABLE_MODULES_MANAGEMENT=true",
 		"cni_conf.MOUNT_LOCAL_BIN_DIR=false",
 	} {
 		if !strings.Contains(values, want) {
@@ -328,11 +327,28 @@ func TestKubeOVNValuesTalosReadOnlyRootfs(t *testing.T) {
 		}
 	}
 
-	// kind nodes have a writable rootfs and bind-mount /lib/modules, so they
+	// Those host paths are a Talos problem only; kind has a writable rootfs and
 	// must keep the chart defaults.
 	kindValues := strings.Join(kubeOVNValues(cluster.ProviderKind), " ")
-	if strings.Contains(kindValues, "DISABLE_MODULES_MANAGEMENT") {
-		t.Errorf("kind must let kube-ovn manage modules:\n%s", kindValues)
+	if strings.Contains(kindValues, "/var/lib/openvswitch") {
+		t.Errorf("kind should keep the chart's default host paths:\n%s", kindValues)
+	}
+}
+
+// Module management has to be off for BOTH providers, or ovs-ovn crash-loops on
+// `ovs-ctl load-kmod` while the control plane still looks healthy.
+//
+// kind is the one that is easy to get wrong: its nodes bind-mount /lib/modules,
+// so letting the chart modprobe looks right — but on Docker Desktop the shared
+// LinuxKit kernel has openvswitch compiled in (modules.builtin, no .ko), so the
+// modprobe fails with EPERM on a module that is already there. Observed as every
+// ovs-ovn and kube-ovn-cni pod in CrashLoopBackOff on a kind cluster.
+func TestKubeOVNDisablesModuleManagementEverywhere(t *testing.T) {
+	for _, prov := range []cluster.Provider{cluster.ProviderKind, cluster.ProviderTalos} {
+		values := strings.Join(kubeOVNValues(prov), " ")
+		if !strings.Contains(values, "DISABLE_MODULES_MANAGEMENT=true") {
+			t.Errorf("%s must not let kube-ovn modprobe:\n%s", prov, values)
+		}
 	}
 }
 
