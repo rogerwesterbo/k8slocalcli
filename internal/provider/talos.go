@@ -161,8 +161,12 @@ func (t *Talos) runTalosCreate(ctx context.Context, customCNI bool, name string,
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	done := make(chan error, 1)
-	go func() { done <- runner.New(out).Run(runCtx, "talosctl", args...) }()
+	var runErr error
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runErr = runner.New(out).Run(runCtx, "talosctl", args...)
+	}()
 
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -171,9 +175,9 @@ func (t *Talos) runTalosCreate(ctx context.Context, customCNI bool, name string,
 
 	for {
 		select {
-		case err := <-done:
+		case <-done:
 			// talosctl returned on its own (typically an early failure).
-			return err
+			return runErr
 		case <-timeout.C:
 			cancel()
 			<-done

@@ -29,7 +29,7 @@ GOVULNCHECK ?= $(LOCALBIN)/govulncheck
 GO_VERSION := $(shell awk '/^go /{print $$2}' go.mod)
 GO_TOOLCHAIN := go$(GO_VERSION)
 GOLANGCI_LINT_VERSION ?= latest
-GOSEC_VERSION ?= latest
+GOSEC_VERSION ?= master
 GOVULNCHECK_VERSION ?= latest
 
 # Version metadata embedded in the binary
@@ -121,6 +121,16 @@ gosec: install-security-scanner ## Run gosec security scan.
 .PHONY: govulncheck
 govulncheck: install-govulncheck ## Run govulncheck vulnerability scan.
 	$(GOVULNCHECK) ./...
+
+##@ Precheck
+.PHONY: precheck
+precheck: ## Run all checks (lint, test, build, gosec, govulncheck)
+	@$(MAKE) lint
+	@$(MAKE) test
+	@$(MAKE) build
+	@$(MAKE) gosec
+	@$(MAKE) govulncheck
+	@printf "$(GREEN)$(BOLD)✓ All prechecks passed!$(RESET)\n"
 
 ##@ Tools
 .PHONY: golangci-lint
