@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -145,11 +146,39 @@ func TestParseTalosContexts(t *testing.T) {
 		"          demo     127.0.0.1:50001   127.0.0.1\n" +
 		"*         dev      127.0.0.1:50000   \n"
 	got := parseTalosContexts(out)
-	if len(got) != 2 || got[0] != "demo" || got[1] != "dev" {
-		t.Errorf("parseTalosContexts = %v, want [demo dev]", got)
+	if len(got) != 2 || got[0].Name != "demo" || got[1].Name != "dev" || !got[0].hasPort("50001") {
+		t.Errorf("parseTalosContexts = %+v, want demo(:50001), dev", got)
 	}
 	if got := parseTalosContexts("CURRENT   NAME   ENDPOINTS   NODES\n"); len(got) != 0 {
 		t.Errorf("expected no contexts from header-only output, got %v", got)
+	}
+}
+
+// Mirrors a real talosconfig after two failed attempts: "test" and "test-1"
+// point at dead ports, "test-2" at the live cluster.
+func TestPickAndStaleTalosContexts(t *testing.T) {
+	ctxs := parseTalosContexts("CURRENT   NAME     ENDPOINTS         NODES\n" +
+		"          test     127.0.0.1:62486   \n" +
+		"          test-1   127.0.0.1:64233   \n" +
+		"*         test-2   127.0.0.1:64946   \n" +
+		"          test-x   127.0.0.1:1111    \n" +
+		"          mytest   127.0.0.1:2222    \n" +
+		"          test-9   127.0.0.1:3333    \n")
+
+	if got := pickTalosContext(ctxs, "test", "64946"); got != "test-2" {
+		t.Errorf("pick with live port = %q, want test-2", got)
+	}
+	if got := pickTalosContext(ctxs, "test", ""); got != "test" {
+		t.Errorf("pick without port = %q, want test", got)
+	}
+	if got := pickTalosContext(ctxs, "nope", ""); got != "" {
+		t.Errorf("pick unknown = %q, want empty", got)
+	}
+
+	// test-9 is a real cluster named "test-9"; test-x and mytest are unrelated.
+	got := staleTalosContexts(ctxs, "test", "64946", []string{"test", "test-9"})
+	if !slices.Equal(got, []string{"test", "test-1"}) {
+		t.Errorf("stale = %v, want [test test-1]", got)
 	}
 }
 
@@ -236,7 +265,7 @@ func TestParseHostPort(t *testing.T) {
 }
 
 func TestTalosK8sVersionsFor(t *testing.T) {
-	if v := talosK8sVersionsFor("1.14"); len(v) == 0 || v[0] != "1.37.0" {
+	if v := talosK8sVersionsFor("1.14"); len(v) == 0 || v[0] != "1.37.2" {
 		t.Errorf("talos 1.14 versions unexpected: %v", v)
 	}
 	if v := talosK8sVersionsFor("1.13"); len(v) == 0 || v[0] != "1.36.1" {
@@ -436,5 +465,14 @@ func TestFreeTalosSubnetSkipsTakenOnes(t *testing.T) {
 	got = pickTalosSubnet([]string{talosDefaultSubnet, "10.5.1.0/24", "10.5.2.0/24"})
 	if got != "10.5.3.0/24" {
 		t.Errorf("fourth cluster should get 10.5.3.0/24, got %q", got)
+	}
+}
+
+func TestFilterTalosContainers(t *testing.T) {
+	names := []string{"test-controlplane-1", "test-worker-1", "mytest-controlplane-1", "test-other", "test2-worker-1"}
+	got := filterTalosContainers(names, "test")
+	want := []string{"test-controlplane-1", "test-worker-1"}
+	if !slices.Equal(got, want) {
+		t.Errorf("filterTalosContainers = %v, want %v", got, want)
 	}
 }

@@ -94,6 +94,11 @@ type Spec struct {
 	// controller on the first control-plane node.
 	HTTPPort  int
 	HTTPSPort int
+
+	// CACerts are extra PEM files with CA certificates the nodes should trust,
+	// e.g. the root CA of a TLS-intercepting corporate proxy. Certificates in
+	// ~/.k8slocalcli/ca-certificates are added automatically.
+	CACerts []string
 }
 
 // DefaultSpec returns a Spec pre-populated with sensible defaults.

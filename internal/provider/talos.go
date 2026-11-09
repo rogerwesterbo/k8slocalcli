@@ -103,23 +103,35 @@ func (t *Talos) Create(ctx context.Context, spec cluster.Spec, out io.Writer) er
 		args = append(args, "--subnet", subnet)
 	}
 
+	patches := []string{talosDiscoveryOffPatch(mm)}
+
+	bundle, sources, err := caBundle(spec.CACerts)
+	if err != nil {
+		return err
+	}
+	if bundle != "" {
+		fmt.Fprintf(out, "🔐 Trusting extra CA certificates from: %s\n", strings.Join(sources, ", "))
+		patches = append(patches, talosTrustedRootsPatch(bundle))
+	}
+
 	// For a custom CNI, disable Talos's default CNI (and kube-proxy for Cilium)
 	// via a machine-config patch whose shape depends on the talosctl version.
 	if spec.CNI.Custom() {
-		patchFile, err := os.CreateTemp("", "talos-cni-patch-*.yaml")
-		if err != nil {
-			return fmt.Errorf("creating talos CNI patch: %w", err)
-		}
-		defer func() { _ = os.Remove(patchFile.Name()) }()
-		if _, err := patchFile.WriteString(talosCNIPatch(spec.CNI, mm)); err != nil {
-			_ = patchFile.Close()
-			return fmt.Errorf("writing talos CNI patch: %w", err)
-		}
-		if err := patchFile.Close(); err != nil {
-			return fmt.Errorf("closing talos CNI patch: %w", err)
-		}
-		args = append(args, "--config-patch", "@"+patchFile.Name())
+		patches = append(patches, talosCNIPatch(spec.CNI, mm))
 	}
+
+	for _, patch := range patches {
+		file, cleanup, err := writeTempPatch(patch)
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		args = append(args, "--config-patch", "@"+file)
+	}
+
+	// Contexts left by earlier attempts would make talosctl name this one
+	// "<name>-N"; clear them so it gets the plain cluster name.
+	t.removeStaleTalosContexts(ctx, spec.Name, out)
 
 	if err := t.runTalosCreate(ctx, spec.CNI.Custom(), spec.Name, args, out); err != nil {
 		return fmt.Errorf("could not create talos cluster: %w", err)
@@ -146,6 +158,26 @@ func (t *Talos) Create(ctx context.Context, spec cluster.Spec, out io.Writer) er
 
 	fmt.Fprintf(out, "\n✅ Talos cluster %q is ready\n", spec.Name)
 	return nil
+}
+
+// writeTempPatch writes a machine-config patch to a temporary file for
+// `talosctl --config-patch @file` and returns a func that removes it.
+func writeTempPatch(patch string) (string, func(), error) {
+	f, err := os.CreateTemp("", "talos-patch-*.yaml")
+	if err != nil {
+		return "", nil, fmt.Errorf("creating talos config patch: %w", err)
+	}
+	cleanup := func() { _ = os.Remove(f.Name()) }
+	if _, err := f.WriteString(patch); err != nil {
+		_ = f.Close()
+		cleanup()
+		return "", nil, fmt.Errorf("writing talos config patch: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("closing talos config patch: %w", err)
+	}
+	return f.Name(), cleanup, nil
 }
 
 // runTalosCreate runs `talosctl cluster create`. With a custom CNI the default
@@ -253,35 +285,113 @@ func (t *Talos) MergeKubeconfig(ctx context.Context, name string, out io.Writer)
 }
 
 // kubeconfigArgs builds a `talosctl kubeconfig` invocation for the cluster,
-// writing to localPath (empty = merge into the default kubeconfig). When the
-// talosconfig has a context named after the cluster (talosctl cluster create
-// names it so) it is selected explicitly; otherwise talosctl's current context
-// is used, which is the most recently created cluster.
+// writing to localPath (empty = merge into the default kubeconfig). The
+// talosconfig context is chosen by talosContextFor; when none matches,
+// talosctl's current context is used (the most recently created cluster).
 func (t *Talos) kubeconfigArgs(ctx context.Context, name, localPath string, extra ...string) []string {
 	args := []string{"kubeconfig"}
 	if localPath != "" {
 		args = append(args, localPath)
 	}
 	args = append(args, "--cluster", name, "--nodes", "127.0.0.1")
-	if t.hasTalosContext(ctx, name) {
-		args = append(args, "--context", name)
+	if c := t.talosContextFor(ctx, name); c != "" {
+		args = append(args, "--context", c)
 	}
 	return append(args, extra...)
 }
 
-// hasTalosContext reports whether the talosconfig contains a context named name.
-func (t *Talos) hasTalosContext(ctx context.Context, name string) bool {
+// talosContextFor returns the talosconfig context that reaches cluster name.
+// The name alone is not reliable: talosctl renames a new context to
+// "<name>-1", "<name>-2", ... when a context called <name> is already there
+// (e.g. left over from a failed attempt), and that stale one points at a dead
+// port. So the context whose endpoint is the cluster's live apid port wins.
+func (t *Talos) talosContextFor(ctx context.Context, name string) string {
 	out, err := runner.New(nil).Capture(ctx, "talosctl", "config", "contexts")
 	if err != nil {
-		return false
+		return ""
 	}
-	return slices.Contains(parseTalosContexts(out), name)
+	port, _ := dockerHostPort(ctx, name+"-controlplane-1", talosAPIPort)
+	return pickTalosContext(parseTalosContexts(out), name, port)
 }
 
-// parseTalosContexts extracts the context names from `talosctl config contexts`
-// output, a table with a CURRENT column ("*" on the active row) then NAME.
-func parseTalosContexts(out string) []string {
-	var names []string
+// talosAPIPort is the apid port inside a Talos node container.
+const talosAPIPort = "50000"
+
+// pickTalosContext prefers the context whose endpoint uses apidPort (the
+// host port Docker published for this cluster), then one named exactly name.
+func pickTalosContext(contexts []talosContext, name, apidPort string) string {
+	if apidPort != "" {
+		for _, c := range contexts {
+			if c.hasPort(apidPort) {
+				return c.Name
+			}
+		}
+	}
+	for _, c := range contexts {
+		if c.Name == name {
+			return c.Name
+		}
+	}
+	return ""
+}
+
+// removeStaleTalosContexts drops talosconfig contexts that talosctl created
+// for earlier clusters called name ("<name>" and "<name>-N") and that no longer
+// reach anything, so the next create gets the plain name again and
+// talosContextFor is not confused. Kept: the context of the live cluster (by
+// apid port) and "<name>-N" when a Talos cluster is literally named that.
+// talosctl itself refuses to remove the current context. Best effort.
+func (t *Talos) removeStaleTalosContexts(ctx context.Context, name string, out io.Writer) {
+	list, err := runner.New(nil).Capture(ctx, "talosctl", "config", "contexts")
+	if err != nil {
+		return
+	}
+	livePort, _ := dockerHostPort(ctx, name+"-controlplane-1", talosAPIPort)
+	clusters, _ := t.List(ctx)
+	for _, c := range staleTalosContexts(parseTalosContexts(list), name, livePort, clusters) {
+		_ = runner.New(out).Run(ctx, "talosctl", "config", "remove", c, "--noconfirm")
+	}
+}
+
+var talosContextSuffixRe = regexp.MustCompile(`^-\d+$`)
+
+// staleTalosContexts is the pure selection behind removeStaleTalosContexts.
+func staleTalosContexts(contexts []talosContext, name, livePort string, clusters []string) []string {
+	var stale []string
+	for _, c := range contexts {
+		if c.Name != name {
+			rest, ok := strings.CutPrefix(c.Name, name)
+			if !ok || !talosContextSuffixRe.MatchString(rest) || slices.Contains(clusters, c.Name) {
+				continue
+			}
+		}
+		if livePort != "" && c.hasPort(livePort) {
+			continue
+		}
+		stale = append(stale, c.Name)
+	}
+	return stale
+}
+
+// talosContext is one row of `talosctl config contexts`.
+type talosContext struct {
+	Name      string
+	Endpoints []string // e.g. ["127.0.0.1:64946"]
+}
+
+func (c talosContext) hasPort(port string) bool {
+	for _, e := range c.Endpoints {
+		if strings.HasSuffix(e, ":"+port) {
+			return true
+		}
+	}
+	return false
+}
+
+// parseTalosContexts parses `talosctl config contexts` output, a table with a
+// CURRENT column ("*" on the active row), then NAME, ENDPOINTS, NODES.
+func parseTalosContexts(out string) []talosContext {
+	var contexts []talosContext
 	for i, line := range nonEmptyLines(out) {
 		if i == 0 && strings.HasPrefix(line, "CURRENT") {
 			continue
@@ -290,11 +400,16 @@ func parseTalosContexts(out string) []string {
 		if len(fields) > 0 && fields[0] == "*" {
 			fields = fields[1:]
 		}
-		if len(fields) > 0 {
-			names = append(names, fields[0])
+		if len(fields) == 0 {
+			continue
 		}
+		c := talosContext{Name: fields[0]}
+		if len(fields) > 1 {
+			c.Endpoints = strings.Split(fields[1], ",")
+		}
+		contexts = append(contexts, c)
 	}
-	return names
+	return contexts
 }
 
 // fixKubeconfigServer rewrites the cluster's API server URL in a kubeconfig to
@@ -362,18 +477,66 @@ func (t *Talos) Delete(ctx context.Context, name string, out io.Writer) error {
 	}
 
 	// Best-effort cleanup of any leftover containers/network for this cluster.
-	if names, derr := dockerNames(ctx, name+"-"); derr == nil {
-		for _, c := range names {
-			_ = r.Run(ctx, "docker", "rm", "-f", c)
-		}
+	for _, c := range talosContainers(ctx, name) {
+		_ = r.Run(ctx, "docker", "rm", "-f", c)
 	}
 	_ = r.Run(ctx, "docker", "network", "rm", name)
 
 	// Remove the cluster state directory.
 	_ = os.RemoveAll(filepath.Join(state, name))
+	t.removeStaleTalosContexts(ctx, name, out)
 
 	fmt.Fprintf(out, "\n✅ Talos cluster %q deleted\n", name)
 	return nil
+}
+
+// Leftovers implements LeftoverChecker. It reports what a previous (usually
+// failed) attempt left behind for name: talosctl refuses to create a cluster
+// while its state directory exists, even when it is empty.
+func (t *Talos) Leftovers(ctx context.Context, name string) []string {
+	var found []string
+	if state, err := stateDir(); err == nil {
+		dir := filepath.Join(state, name)
+		if _, err := os.Stat(dir); err == nil {
+			found = append(found, "state directory "+dir)
+		}
+	}
+	for _, c := range talosContainers(ctx, name) {
+		found = append(found, "container "+c)
+	}
+	if runner.LookPath("docker") {
+		label, err := runner.New(nil).Capture(ctx, "docker", "network", "inspect", name,
+			"--format", `{{index .Labels "talos.cluster.name"}}`)
+		if err == nil && label == name {
+			found = append(found, "docker network "+name)
+		}
+	}
+	return found
+}
+
+// talosContainers returns the node containers of cluster name
+// ("<name>-controlplane-N", "<name>-worker-N"). Docker's name filter is a
+// substring match, so results are narrowed to an exact prefix: otherwise
+// cluster "test" would also match "mytest-controlplane-1".
+func talosContainers(ctx context.Context, name string) []string {
+	if !runner.LookPath("docker") {
+		return nil
+	}
+	names, err := dockerNames(ctx, name+"-")
+	if err != nil {
+		return nil
+	}
+	return filterTalosContainers(names, name)
+}
+
+func filterTalosContainers(names []string, cluster string) []string {
+	var out []string
+	for _, n := range names {
+		if strings.HasPrefix(n, cluster+"-controlplane-") || strings.HasPrefix(n, cluster+"-worker-") {
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 // List implements Provider. Talos Docker clusters are discovered by their

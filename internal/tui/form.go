@@ -1,5 +1,5 @@
 // Package tui implements the interactive terminal UI used to collect cluster
-// parameters (provider, name, control planes, workers, Kubernetes version, CNI)
+// parameters (name, provider, control planes, workers, Kubernetes version, CNI)
 // before creation. It is built on github.com/gizak/termui/v3.
 package tui
 
@@ -16,8 +16,8 @@ import (
 // Focusable items, in tab order. The first numFields are stacked input fields;
 // the last two are the Create / Cancel buttons.
 const (
-	fieldProvider = iota
-	fieldName
+	fieldName = iota
+	fieldProvider
 	fieldControlPlanes
 	fieldWorkers
 	fieldK8sVersion

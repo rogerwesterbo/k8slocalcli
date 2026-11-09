@@ -145,7 +145,7 @@ The provider is auto-detected like `delete`. `kubeconfig` is aliased to `kc`;
   the tool warns and creates one (use the QEMU backend, not covered here, for
   multi-control-plane Talos). State is stored under `~/.k8slocalcli/clusters`.
   The Kubernetes version defaults to the newest entry in the Talos support
-  matrix for your installed `talosctl` (Talos 1.14 → Kubernetes 1.37.0, with
+  matrix for your installed `talosctl` (Talos 1.14 → Kubernetes 1.37.2, with
   1.33–1.37 selectable).
 - **CNI**: the default keeps the provider's built-in CNI (kindnet for kind,
   Flannel for Talos). Choosing **Cilium**, **Calico** or **Kube-OVN** disables
@@ -189,6 +189,21 @@ The provider is auto-detected like `delete`. `kubeconfig` is aliased to `kc`;
   `10.5.x.0/24` is passed to `talosctl --subnet` when the default is in use.
 - **No workers**: when a cluster has 0 workers, the control-plane `NoSchedule`
   taint is removed so workloads can run on it.
+- **Corporate proxy / "x509: certificate signed by unknown authority"** (talos):
+  if your network intercepts TLS, the nodes cannot pull images (e.g. etcd from
+  `registry.k8s.io`) and etcd hangs in `Preparing`. Put the proxy's root CA as
+  a PEM file in `~/.k8slocalcli/ca-certificates/` (or pass `--ca-cert FILE`) and
+  it is added to every node's trusted roots. On macOS you can export it from the
+  keychain:
+
+  ```sh
+  mkdir -p ~/.k8slocalcli/ca-certificates
+  security find-certificate -c "<root CA name>" -p /Library/Keychains/System.keychain \
+    > ~/.k8slocalcli/ca-certificates/corporate-root.pem
+  ```
+
+  The Talos discovery service (`discovery.talos.dev`) is disabled: a
+  single-host Docker cluster does not need it.
 
 ## Development
 

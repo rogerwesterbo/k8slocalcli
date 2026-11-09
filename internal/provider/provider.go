@@ -50,6 +50,15 @@ type Provider interface {
 	KubernetesVersions(ctx context.Context) []string
 }
 
+// LeftoverChecker is optionally implemented by providers whose failed or
+// interrupted creates can leave state behind (files, containers, networks)
+// that blocks creating a cluster with the same name, even though Exists
+// reports false. Leftovers returns a human-readable line per item found;
+// Delete is expected to remove them.
+type LeftoverChecker interface {
+	Leftovers(ctx context.Context, name string) []string
+}
+
 // registry holds the available providers keyed by name.
 var registry = map[cluster.Provider]Provider{}
 

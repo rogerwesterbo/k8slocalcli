@@ -30,6 +30,22 @@ func TestRunError(t *testing.T) {
 	}
 }
 
+func TestIsLocalDockerEndpoint(t *testing.T) {
+	cases := map[string]bool{
+		"unix:///var/run/docker.sock":               true,
+		"unix:///Users/me/.docker/run/docker.sock":  true,
+		"npipe:////./pipe/dockerDesktopLinuxEngine": true,
+		"tcp://192.168.1.10:2376":                   false,
+		"ssh://user@remote":                         false,
+		"":                                          false,
+	}
+	for in, want := range cases {
+		if got := isLocalDockerEndpoint(in); got != want {
+			t.Errorf("isLocalDockerEndpoint(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
 func TestLookPath(t *testing.T) {
 	if !LookPath("echo") {
 		t.Error("expected echo to be on PATH")

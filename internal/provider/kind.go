@@ -56,6 +56,10 @@ func (k *Kind) Create(ctx context.Context, spec cluster.Spec, out io.Writer) err
 		fmt.Fprintf(out, "⚠️  Kubernetes version %q is not pinned; falling back to %s\n", spec.K8sVersion, version)
 	}
 
+	if len(spec.CACerts) > 0 {
+		fmt.Fprintf(out, "⚠️  --ca-cert is not supported for kind yet; ignoring %d certificate file(s)\n", len(spec.CACerts))
+	}
+
 	configYAML := kindConfig(spec, image)
 
 	cfgFile, err := os.CreateTemp("", "kind-config-*.yaml")

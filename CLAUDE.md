@@ -69,6 +69,29 @@ Understanding these four seams is enough to be productive:
 
 ## Provider-specific gotchas
 
+- **DOCKER_HOST**: talosctl (Docker Go SDK) ignores Docker CLI contexts, so on
+  Docker Desktop without `/var/run/docker.sock` it cannot reach the daemon.
+  `cli.Execute` calls `runner.EnsureDockerHost`, which exports `DOCKER_HOST`
+  from `docker context inspect` when it is unset.
+- **Re-creating a name** (`clearExisting` in `cli/root.go`): an existing cluster
+  is replaced only after a default-no prompt; leftovers from a failed attempt
+  (providers implementing `provider.LeftoverChecker` — Talos: state dir, node
+  containers, labelled network; talosctl refuses to create while the state dir
+  exists, even empty) get a default-yes prompt. Both clean up via
+  `Provider.Delete`. `--yes` skips prompts; without a terminal it errors.
+- **Talos machine-config patches** (`talos.go` Create, `trust.go`): always
+  disables discovery (1.14+: delete the `DiscoveryServiceConfig` doc; older:
+  `cluster.discovery.enabled: false`); adds a `TrustedRootsConfig` from
+  `--ca-cert` files plus `~/.k8slocalcli/ca-certificates/*.pem|*.crt` (for
+  TLS-intercepting proxies — otherwise etcd's image pull fails with x509 and
+  bootstrap hangs); then the CNI patch. Each goes as its own `--config-patch`.
+  kind ignores `--ca-cert` (warns) for now.
+- **talosconfig contexts**: talosctl renames a new context to `<name>-N` when
+  `<name>` already exists (e.g. from a failed attempt), and the old one points
+  at a dead port. `talosContextFor` therefore picks the context whose endpoint
+  is the live apid host port (`50000/tcp` on `<name>-controlplane-1`), and
+  `removeStaleTalosContexts` (in Create and Delete) drops dead `<name>`/`<name>-N`
+  contexts. talosctl won't remove the current context.
 - **Talos Docker backend = single control plane.** `talosctl cluster create
   docker` ignores `--controlplanes`; the talos provider warns and creates one if
   more are requested. Talos state lives in `~/.k8slocalcli/clusters`.

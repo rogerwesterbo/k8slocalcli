@@ -11,6 +11,7 @@ import (
 
 	"github.com/rogerwesterbo/k8slocalcli/internal/cluster"
 	"github.com/rogerwesterbo/k8slocalcli/internal/provider"
+	"github.com/rogerwesterbo/k8slocalcli/internal/runner"
 	"github.com/rogerwesterbo/k8slocalcli/internal/tui"
 )
 
@@ -20,6 +21,9 @@ var version = "dev"
 // Execute builds and runs the root command.
 func Execute(ctx context.Context) error {
 	root := newRootCmd()
+	// talosctl ignores Docker CLI contexts; point it (and every other child
+	// process) at the daemon the docker CLI is using.
+	runner.EnsureDockerHost(ctx)
 	// Before handing off to cobra, see if this invocation targets an external
 	// k8slocalcli-* plugin on PATH; if so, exec it instead.
 	if handled, err := maybeDispatchPlugin(root); handled {
@@ -45,6 +49,7 @@ func newRootCmd() *cobra.Command {
 
 func newCreateCmd() *cobra.Command {
 	spec := cluster.DefaultSpec()
+	var assumeYes bool
 
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -70,7 +75,7 @@ func newCreateCmd() *cobra.Command {
 				}
 				spec = res.Spec
 			}
-			return runCreate(cmd.Context(), spec, cmd.OutOrStdout())
+			return runCreate(cmd.Context(), spec, newPrompter(cmd.OutOrStdout(), assumeYes), cmd.OutOrStdout())
 		},
 	}
 
@@ -83,6 +88,8 @@ func newCreateCmd() *cobra.Command {
 	cniFlag := flags.String("cni", string(spec.CNI), "CNI: default, cilium, calico or kube-ovn")
 	flags.IntVar(&spec.HTTPPort, "http-port", spec.HTTPPort, "host port mapped to ingress :80")
 	flags.IntVar(&spec.HTTPSPort, "https-port", spec.HTTPSPort, "host port mapped to ingress :443")
+	flags.StringArrayVar(&spec.CACerts, "ca-cert", nil, "extra CA certificate (PEM file) for the nodes to trust, e.g. a corporate proxy root CA; repeatable (talos). Files in ~/.k8slocalcli/ca-certificates are always added")
+	flags.BoolVarP(&assumeYes, "yes", "y", false, "answer yes to prompts (replace an existing cluster or remove leftovers of the same name)")
 
 	cmd.PreRunE = func(_ *cobra.Command, _ []string) error {
 		spec.Provider = cluster.Provider(*providerFlag)
@@ -93,7 +100,7 @@ func newCreateCmd() *cobra.Command {
 	return cmd
 }
 
-func runCreate(ctx context.Context, spec cluster.Spec, out io.Writer) error {
+func runCreate(ctx context.Context, spec cluster.Spec, ask *prompter, out io.Writer) error {
 	if err := spec.Validate(); err != nil {
 		return err
 	}
@@ -106,12 +113,8 @@ func runCreate(ctx context.Context, spec cluster.Spec, out io.Writer) error {
 		return err
 	}
 
-	exists, err := p.Exists(ctx, spec.Name)
-	if err != nil {
-		return fmt.Errorf("checking for existing cluster: %w", err)
-	}
-	if exists {
-		return fmt.Errorf("a %s cluster named %q already exists; delete it first or choose another name", spec.Provider, spec.Name)
+	if err := clearExisting(ctx, p, spec, ask, out); err != nil {
+		return err
 	}
 
 	// Resolved before Create because both providers publish the ingress ports on
@@ -269,4 +272,40 @@ func resolveProvider(ctx context.Context, name, explicit string) (provider.Provi
 		}
 	}
 	return nil, fmt.Errorf("no cluster named %q found in any provider (use --provider to force)", name)
+}
+
+// clearExisting makes sure nothing with spec.Name stands in the way of
+// creating it. An existing cluster is only replaced after an explicit yes
+// (default no); leftovers of an earlier failed attempt are removed after a
+// confirmation that defaults to yes. Both are cleaned up with Provider.Delete.
+func clearExisting(ctx context.Context, p provider.Provider, spec cluster.Spec, ask *prompter, out io.Writer) error {
+	exists, err := p.Exists(ctx, spec.Name)
+	if err != nil {
+		return fmt.Errorf("checking for existing cluster: %w", err)
+	}
+	if exists {
+		ok, err := ask.confirm(fmt.Sprintf("⚠️  A %s cluster named %q already exists. Delete it and create a new one?", spec.Provider, spec.Name), false)
+		if err != nil || !ok {
+			return fmt.Errorf("a %s cluster named %q already exists; delete it first, choose another name, or pass --yes to replace it", spec.Provider, spec.Name)
+		}
+		return p.Delete(ctx, spec.Name, out)
+	}
+
+	lc, ok := p.(provider.LeftoverChecker)
+	if !ok {
+		return nil
+	}
+	left := lc.Leftovers(ctx, spec.Name)
+	if len(left) == 0 {
+		return nil
+	}
+	fmt.Fprintf(out, "🧹 Found leftovers from an earlier %s cluster %q:\n", spec.Provider, spec.Name)
+	for _, l := range left {
+		fmt.Fprintf(out, "   - %s\n", l)
+	}
+	ok, err = ask.confirm("Remove them and continue?", true)
+	if err != nil || !ok {
+		return fmt.Errorf("leftovers of %s cluster %q block creation; run `k8slocalcli delete %s --provider %s` or pass --yes", spec.Provider, spec.Name, spec.Name, spec.Provider)
+	}
+	return p.Delete(ctx, spec.Name, out)
 }

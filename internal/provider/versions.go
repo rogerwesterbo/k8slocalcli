@@ -44,9 +44,9 @@ func kindImageFor(version string) (image string, resolvedVersion string, ok bool
 // talosK8sVersions maps a talosctl major.minor version to the list of supported
 // Kubernetes versions, newest first. Source: Talos support matrix
 // https://docs.siderolabs.com/talos/v1.14/getting-started/support-matrix
-// (1.37.0 is the default of talosctl v1.14.1).
+// (Talos 1.14 supports all Kubernetes 1.37.x patch releases).
 var talosK8sVersions = map[string][]string{
-	"1.14": {"1.37.0", "1.36.1", "1.35.5", "1.34.8", "1.33.12"},
+	"1.14": {"1.37.2", "1.37.1", "1.37.0", "1.36.1", "1.35.5", "1.34.8", "1.33.12"},
 	"1.13": {"1.36.1", "1.35.5", "1.34.8", "1.33.12", "1.32.13", "1.31.14"},
 	"1.12": {"1.35.4", "1.34.1", "1.33.1", "1.32.3", "1.31.6", "1.30.10"},
 	"1.11": {"1.34.1", "1.33.1", "1.32.3", "1.31.6", "1.30.10", "1.29.14"},
@@ -57,7 +57,7 @@ var talosK8sVersions = map[string][]string{
 
 // talosLatestK8sVersions is used when the installed talosctl version is not in
 // the support matrix above.
-var talosLatestK8sVersions = []string{"1.37.0", "1.36.1", "1.35.5", "1.34.8", "1.33.12"}
+var talosLatestK8sVersions = []string{"1.37.2", "1.37.1", "1.37.0", "1.36.1", "1.35.5", "1.34.8", "1.33.12"}
 
 // talosK8sVersionsFor returns the supported Kubernetes versions for a talosctl
 // major.minor version, falling back to the latest known set.
