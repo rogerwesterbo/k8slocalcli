@@ -1,232 +1,165 @@
 # k8slocalcli
 
-Create local Kubernetes clusters whose nodes run as **Docker containers**, using
-either **kind** or **Talos Linux** as the provider — driven by an interactive
-terminal UI (built with [`termui/v3`](https://github.com/gizak/termui)).
+Local Kubernetes clusters in Docker — **kind** or **Talos** — with web UIs and
+APIs reachable from your machine at `http://<app>.localtest.me`, and apps such
+as Argo CD installed for you.
 
-The TUI asks for the three things you care about: the cluster **name**, how many
-**control planes**, and how many **workers**. You can also skip the TUI entirely
-and drive everything from flags.
-
-```
-  _    ___      _                 _      _ _
- | |__( _ )___ | |___  __ __ _ | | __| (_)
- | / /| _ (_-< | / _ \/ _/ _` || |/ _| | |
- |_\_\\___/__/ |_\___/\__\__,_||_|\__|_|_|
-        local kubernetes clusters · kind + talos
-```
-
-## Why
-
-This is a Go port of the bash tooling in the sibling
-[`createlocalk8s`](../createlocalk8s) project. The provider model, kind config
-generation, and the Talos support matrix are carried over from there; this
-version adds a typed, testable codebase and an interactive TUI.
-
-## Requirements
-
-- [Docker](https://www.docker.com/) (running) — the nodes are containers.
-- [`kubectl`](https://kubernetes.io/docs/tasks/tools/) — to talk to the cluster.
-- For the **kind** provider: [`kind`](https://kind.sigs.k8s.io/).
-- For the **talos** provider: [`talosctl`](https://www.talos.dev/) (`brew install siderolabs/tap/talosctl`).
-- For the **Cilium**/**Calico**/**Kube-OVN** CNIs: [`helm`](https://helm.sh/) (not needed for the default CNI).
-
-Each provider checks its own prerequisites before doing anything and prints
-install hints if a tool is missing.
-
-## Install / build
+## Install
 
 ```sh
-make build-cli          # builds ./bin/k8slocalcli
-# or
-make install            # go install into your GOBIN
+curl -fsSL https://raw.githubusercontent.com/rogerwesterbo/k8slocalcli/main/install.sh | bash
 ```
 
-## Usage
+Installs into `~/.local/bin` (no sudo). The SHA-256 checksum is always
+verified, and the Sigstore signature too when
+[cosign](https://docs.sigstore.dev/cosign/installation/) is installed. Options:
+`--version v0.1.0`, `--prefix <dir>`; see `install.sh --help`. Linux and macOS,
+amd64 and arm64.
 
-### Interactive (TUI)
+From source: `make install` (needs Go).
+
+### Updating
 
 ```sh
-k8slocalcli create
+k8slocalcli upgrade            # replace this binary with the latest release (verified like install.sh)
+k8slocalcli upgrade --check    # only tell me if there is a newer one
 ```
 
-You'll get a form:
+After other commands k8slocalcli mentions a newer release, checking GitHub at
+most once a day. Set `K8SLOCALCLI_NO_UPDATE_CHECK=1` to turn that off.
 
-| Field              | Keys                                                  |
-|--------------------|------------------------------------------------------|
-| Provider           | `←` / `→` to toggle **kind** ↔ **talos**             |
-| Cluster name       | type (lowercase letters, digits, `-`)                |
-| Control planes     | `←` / `→` to adjust, or type a number                |
-| Workers            | `←` / `→` to adjust, or type a number                |
-| Kubernetes version | `←` / `→` to cycle versions (defaults to latest)     |
-| CNI                | `←` / `→` to choose **default** / **cilium** / **calico** / **kube-ovn** |
+### You also need
 
-`↑`/`↓` or `Tab` move between fields. `Enter` advances to the next field; on the
-**Create** button it builds the cluster. There are explicit **Create** and
-**Cancel** buttons at the bottom — `←`/`→` switches between them. `Esc` cancels
-at any time.
+| Tool | Why | Install |
+|------|-----|---------|
+| Docker (running) | nodes are containers | [docs.docker.com](https://docs.docker.com/get-docker/) |
+| `kind` **or** `talosctl` | the cluster provider | `brew install kind` / `brew install siderolabs/tap/talosctl` |
+| `kubectl` | talks to the cluster | `brew install kubectl` |
+| `helm` | default install method for apps | `brew install helm` |
 
-The version list is provider-specific; switching provider resets it to that
-provider's latest version. Cilium/Calico/Kube-OVN are installed via Helm, so
-`helm` must be on your PATH when choosing them.
+`k8slocalcli create` checks for these before it creates anything.
 
-### Non-interactive (flags)
-
-Passing `--name` skips the TUI:
+## Quick start
 
 ```sh
-# kind cluster with 1 control plane and 2 workers
-k8slocalcli create --name dev --provider kind --workers 2
-
-# talos cluster
-k8slocalcli create --name talosdev --provider talos --workers 1
-
-# pin a Kubernetes version and custom ingress host ports
-k8slocalcli create --name dev --k8s-version v1.33.12 --http-port 8080 --https-port 8443
-
-# use Cilium instead of the default CNI
-k8slocalcli create --name dev --cni cilium
-
-# use Kube-OVN instead of the default CNI
-k8slocalcli create --name dev --cni kube-ovn
+k8slocalcli create          # interactive form: name, provider, nodes, apps, ...
 ```
 
-Flags:
-
-```
---name             cluster name (omit for interactive TUI)
---provider         kind | talos                     (default kind)
---control-planes   number of control planes         (default 1)
---workers          number of workers                (default 0)
---k8s-version      Kubernetes version               (default: provider's newest)
---cni              default | cilium | calico | kube-ovn  (default default)
---http-port        host port mapped to ingress :80  (default 80)
---https-port       host port mapped to ingress :443 (default 443)
-```
-
-### List and delete
+Pick **Argo CD** in the form (or run
+`k8slocalcli create --name dev --app argocd`). When it finishes, open
+<http://argocd.localtest.me> and log in as `admin` with the password printed at
+the end. Later:
 
 ```sh
-k8slocalcli list                 # clusters from both providers + kubectl context
-k8slocalcli delete               # interactive picker of existing clusters
-k8slocalcli delete dev           # delete by name (provider auto-detected)
-k8slocalcli delete dev --provider talos
+k8slocalcli info dev       # URLs and passwords again, any time
+k8slocalcli delete dev
 ```
 
-`list` is aliased to `ls`, and `delete` to `d` / `rm`. Running `delete` with no
-name opens a picker (`↑`/`↓` to move, `Enter` to select, then `y` to confirm,
-`Esc` to cancel).
+## Everyday commands
 
-### Kubeconfig
+| Command | What it does |
+|---------|--------------|
+| `k8slocalcli create` | create a cluster (form; or flags with `--name`) |
+| `k8slocalcli list` | list clusters |
+| `k8slocalcli info [name]` | URLs, installed apps and their logins |
+| `k8slocalcli app list` | apps you can install |
+| `k8slocalcli app install argocd --cluster dev` | install an app into an existing cluster |
+| `k8slocalcli kubeconfig dev --merge` | add the cluster to `~/.kube/config` and switch to it |
+| `k8slocalcli delete [name]` | delete a cluster |
+| `k8slocalcli upgrade` | update k8slocalcli itself |
 
-Fetch a cluster's admin kubeconfig from its provider (`kind get kubeconfig` for
-kind, `talosctl kubeconfig` for talos — with the API server URL rewritten to the
-host-mapped port so it is reachable from the host):
+Without a name, `info`, `kubeconfig` and `delete` show a picker. Add `-v` to
+any command to see the full output of every tool it runs.
+
+### Common `create` flags
 
 ```sh
-k8slocalcli kubeconfig dev                        # print to stdout
-k8slocalcli kubeconfig dev -o ~/.kube/dev.yaml     # write to a file (mode 0600)
-k8slocalcli kubeconfig dev --merge                 # merge into ~/.kube/config and switch context
-k8slocalcli kubeconfig                             # pick a cluster interactively
-k8slocalcli kubeconfig talosdev --provider talos
+k8slocalcli create --name dev --provider talos --workers 2
+k8slocalcli create --name dev --app argocd --tls verified       # HTTPS trusted by your browser
+k8slocalcli create --name dev --app argocd:manifest=cd.localtest.me
+k8slocalcli create --name dev --cni cilium                      # cilium | calico | kube-ovn
+k8slocalcli create --name dev --expose=false                    # nothing reachable from the host
 ```
 
-The provider is auto-detected like `delete`. `kubeconfig` is aliased to `kc`;
-`--output` and `--merge` are mutually exclusive.
+`k8slocalcli create --help` lists all flags (Kubernetes version, ports, Gateway
+API channel, install methods, ...).
 
-## Provider notes
+## Reaching services in the cluster
 
-- **kind**: the first control-plane node is labelled `ingress-ready` and gets the
-  `80`/`443` host port mappings so you can run an ingress controller. Node images
-  are pinned by digest per Kubernetes version (see
-  `internal/provider/versions.go`).
-- **talos**: clusters are created with `talosctl cluster create docker`. The
-  Docker backend provisions a **single control plane** — if you request more,
-  the tool warns and creates one (use the QEMU backend, not covered here, for
-  multi-control-plane Talos). State is stored under `~/.k8slocalcli/clusters`.
-  The Kubernetes version defaults to the newest entry in the Talos support
-  matrix for your installed `talosctl` (Talos 1.14 → Kubernetes 1.37.2, with
-  1.33–1.37 selectable).
-- **CNI**: the default keeps the provider's built-in CNI (kindnet for kind,
-  Flannel for Talos). Choosing **Cilium**, **Calico** or **Kube-OVN** disables
-  the default CNI (via the kind config / a Talos machine-config patch) and
-  installs the chosen one with Helm using the values ported from
-  `createlocalk8s`. On Talos 1.14+ the patch deletes the `KubeFlannelCNIConfig`
-  document (and sets `KubeProxyConfig` `enabled: false` for Cilium); older
-  `talosctl` versions get the legacy `cluster.network.cni` / `cluster.proxy`
-  patch, which 1.14 rejects. With a custom CNI,
-  nodes stay `NotReady` until it finishes installing — this is expected.
-- **Kube-OVN**: control-plane nodes are labelled `kube-ovn/role=master` before
-  the Helm install, because the chart resolves the `ovn-central` members with a
-  `lookup` over that label and fails to render without it. The pod/service
-  CIDRs are passed explicitly to match each provider (kind is dual-stack
-  `10.244.0.0/16,fd00:10:244::/56` + `10.96.0.0/16,fd00:10:96::/112`; the
-  talosctl Docker backend is IPv4-only `10.244.0.0/16` + `10.96.0.0/12`).
-  Kube-proxy stays enabled — Kube-OVN does not replace it.
+- Every cluster gets a gateway. Apps are served at `http://<app>.localtest.me`
+  and `https://<app>.localtest.me` — `localtest.me` always points at
+  `127.0.0.1`, so there is nothing to configure.
+- The **first** cluster uses ports 80/443. The **next** ones get 8080/8443,
+  8081/8444, ... — e.g. `http://argocd.localtest.me:8080`. The ports are
+  printed when the cluster is created and by `info`.
+- **HTTPS**: `self-signed` (default, browsers warn) or `verified` — a local CA
+  in `~/.k8slocalcli/ca` that you are asked to trust once (macOS keychain;
+  elsewhere the command to run is printed).
+- `--expose=false` publishes no ports. This **cannot be changed later**; you
+  are warned before the cluster is created. Use `kubectl port-forward` instead.
 
-  > `DISABLE_MODULES_MANAGEMENT=true` is set for **both** providers. `ovs-ovn`
-  > otherwise runs `ovs-ctl load-kmod` at startup and exits when the modprobe
-  > fails, crash-looping while the control plane still looks perfectly healthy.
-  > Talos needs it because it manages modules declaratively and has a read-only
-  > rootfs (hence the `/var/lib` host paths too); kind needs it on Docker
-  > Desktop, where the shared LinuxKit kernel has `openvswitch` compiled *in* —
-  > listed in `modules.builtin` with no `.ko` to load — so the modprobe both
-  > fails and is unnecessary. OVS then comes up on the kernel datapath.
-- **Several clusters at once**: clusters run side by side in Docker. kind puts
-  them all on the shared `kind` network and Docker picks a random host port per
-  API server, so the only thing that cannot be shared is the ingress host ports.
-  They are resolved *before* creation starts (kind would otherwise pull the node
-  image and start every node before Docker rejects the bind, then roll the
-  cluster back):
-  - a port left at its default that is taken moves to the next free fallback —
-    `80` → `8080` → `8081`…, `443` → `8443` → `8444`… — and the new port is
-    printed, so a second cluster needs no flags;
-  - a port you passed explicitly is never moved: that is an error, since
-    publishing on a port you did not ask for is worse than failing.
+## Behind a corporate proxy
 
-  For **talos** the Docker network subnet also collides — every Talos cluster
-  defaults to `10.5.0.0/24` and Docker refuses overlapping pools — so a free
-  `10.5.x.0/24` is passed to `talosctl --subnet` when the default is in use.
-- **No workers**: when a cluster has 0 workers, the control-plane `NoSchedule`
-  taint is removed so workloads can run on it.
-- **Corporate proxy / "x509: certificate signed by unknown authority"** (talos):
-  if your network intercepts TLS, the nodes cannot pull images (e.g. etcd from
-  `registry.k8s.io`) and etcd hangs in `Preparing`. Put the proxy's root CA as
-  a PEM file in `~/.k8slocalcli/ca-certificates/` (or pass `--ca-cert FILE`) and
-  it is added to every node's trusted roots. On macOS you can export it from the
-  keychain:
-
-  ```sh
-  mkdir -p ~/.k8slocalcli/ca-certificates
-  security find-certificate -c "<root CA name>" -p /Library/Keychains/System.keychain \
-    > ~/.k8slocalcli/ca-certificates/corporate-root.pem
-  ```
-
-  The Talos discovery service (`discovery.talos.dev`) is disabled: a
-  single-host Docker cluster does not need it.
-
-## Development
+If image pulls fail with `x509: certificate signed by unknown authority`, your
+network intercepts TLS. Save the proxy's root CA once and every new cluster
+trusts it:
 
 ```sh
-make build         # build all packages
-make test          # unit tests with coverage
+mkdir -p ~/.k8slocalcli/ca-certificates
+security find-certificate -c "<root CA name>" -p /Library/Keychains/System.keychain \
+  > ~/.k8slocalcli/ca-certificates/corporate-root.pem     # macOS
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| A step seems stuck | The spinner line shows what it is waiting for; `-v` shows everything. |
+| `ImagePullBackOff` with x509 | See [Behind a corporate proxy](#behind-a-corporate-proxy). |
+| `<app>.localtest.me` does not load | The CLI warns if your DNS blocks `localtest.me`; add the printed `/etc/hosts` line. |
+| Port 80 already in use | Expected with a second cluster — use the printed port, or pass `--http-port`. |
+| Lost the Argo CD password | `k8slocalcli info <name>` |
+
+## Development and testing
+
+```sh
+make build-cli     # ./bin/k8slocalcli
+make test          # unit tests
 make lint          # golangci-lint
-make fix           # auto-fix lint issues
-make gosec         # security static analysis
-make govulncheck   # known-vulnerability scan
+make gosec         # security scan
+make precheck      # everything above + govulncheck
 ```
 
-### Layout
+Unit tests cover the logic (validation, generated configs and manifests,
+certificates, status parsing). Creating real clusters needs Docker, so check
+changes end to end by hand:
 
-```
-cmd/k8slocalcli      entrypoint
-internal/cluster     provider-agnostic Spec + validation
-internal/runner      shared streaming command runner
-internal/provider    Provider interface, registry, kind + talos, version tables
-internal/tui         termui/v3 interactive form
-internal/cli         cobra command tree (create / list / delete / kubeconfig)
+```sh
+./bin/k8slocalcli create --name e2e --provider kind --workers 1 --app argocd
+curl -s -o /dev/null -w '%{http_code}\n' http://argocd.localtest.me/   # 200 (use :8080 if another cluster has 80)
+./bin/k8slocalcli info e2e
+./bin/k8slocalcli delete e2e
 ```
 
-Both providers share `internal/runner` and the `internal/provider` interface, and
-`cluster.Spec.Validate()` is the single validation path for both the TUI and the
-flag-driven entry point.
+Repeat with `--provider talos`, and with `--tls verified` when touching TLS.
+
+Test `install.sh` without publishing a release by serving archives locally:
+
+```sh
+./install.sh --version v0.0.0-test --base-url file:///path/to/dist --prefix /tmp/k8s-bin --skip-cosign
+```
+
+## Releasing
+
+Push a tag; [`.github/workflows/release.yml`](.github/workflows/release.yml)
+builds the archives, checksums and signs them, and publishes the GitHub release
+that `install.sh` downloads:
+
+```sh
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+## More
+
+[docs/how-it-works.md](docs/how-it-works.md) covers the internals: provider
+details, CNIs, multi-cluster ports and subnets, the gateway and TLS setup.

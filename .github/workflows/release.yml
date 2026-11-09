@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # create the release + upload assets
+  id-token: write # OIDC token for Sigstore keyless signing
+
+jobs:
+  # Pure Go (CGO_ENABLED=0), so every platform cross-compiles on one runner.
+  # Asset names match what install.sh and the plugin manager expect:
+  #   k8slocalcli-<tag>-<os>-<arch>.tar.gz containing
+  #   k8slocalcli-<tag>-<os>-<arch>/k8slocalcli
+  build:
+    name: Build ${{ matrix.goos }}/${{ matrix.goarch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }
+          - { goos: darwin, goarch: amd64 }
+          - { goos: darwin, goarch: arm64 }
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        if: matrix.goos == 'linux' && matrix.goarch == 'amd64'
+        run: go test ./...
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: '0'
+          VERSION: ${{ github.ref_name }}
+        run: make build-cli
+
+      - name: Package
+        run: |
+          ASSET="k8slocalcli-${GITHUB_REF_NAME}-${{ matrix.goos }}-${{ matrix.goarch }}"
+          mkdir -p "dist/${ASSET}"
+          cp bin/k8slocalcli README.md LICENSE "dist/${ASSET}/"
+          tar -C dist -czf "dist/${ASSET}.tar.gz" "${ASSET}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 1
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: binary-*
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum *.tar.gz > "k8slocalcli-${GITHUB_REF_NAME}-SHA256SUMS"
+
+      - uses: sigstore/cosign-installer@v3
+
+      - name: Sign archives (Sigstore keyless)
+        working-directory: dist
+        env:
+          COSIGN_YES: 'true'
+        run: |
+          for f in *.tar.gz; do
+            cosign sign-blob --bundle "${f}.cosign.bundle" "$f"
+          done
+
+      - name: Create GitHub release
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" --clobber \
+              *.tar.gz *.cosign.bundle "k8slocalcli-${GITHUB_REF_NAME}-SHA256SUMS"
+          else
+            gh release create "${GITHUB_REF_NAME}" --repo "${GITHUB_REPOSITORY}" \
+              --generate-notes --latest \
+              *.tar.gz *.cosign.bundle "k8slocalcli-${GITHUB_REF_NAME}-SHA256SUMS"
+          fi

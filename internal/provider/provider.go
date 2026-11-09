@@ -44,6 +44,11 @@ type Provider interface {
 	// context, streaming progress to out.
 	MergeKubeconfig(ctx context.Context, name string, out io.Writer) error
 
+	// GatewayNode returns the name of the node that publishes the gateway host
+	// ports (the first control plane). For both providers the node container
+	// and the Kubernetes node share this name.
+	GatewayNode(name string) string
+
 	// KubernetesVersions returns the Kubernetes versions this provider can
 	// create, newest first (index 0 is the default/latest). The list may depend
 	// on the installed tooling, hence the context.

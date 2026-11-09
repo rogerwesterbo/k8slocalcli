@@ -90,10 +90,18 @@ type Spec struct {
 	// provider's built-in CNI.
 	CNI CNI
 
-	// HTTPPort and HTTPSPort are the host ports mapped to the ingress
-	// controller on the first control-plane node.
+	// HTTPPort and HTTPSPort are the host ports published to the gateway's
+	// NodePorts (GatewayHTTPNodePort/GatewayHTTPSNodePort) on the first
+	// control-plane node. Unused when Exposure is off.
 	HTTPPort  int
 	HTTPSPort int
+
+	// Exposure controls whether services can be reached from the host and how
+	// (Gateway API controller, channel, certificates).
+	Exposure Exposure
+
+	// Apps are catalog applications to install once the cluster is up.
+	Apps []AppRequest
 
 	// CACerts are extra PEM files with CA certificates the nodes should trust,
 	// e.g. the root CA of a TLS-intercepting corporate proxy. Certificates in
@@ -110,6 +118,7 @@ func DefaultSpec() Spec {
 		CNI:           CNIDefault,
 		HTTPPort:      DefaultHTTPPort,
 		HTTPSPort:     DefaultHTTPSPort,
+		Exposure:      DefaultExposure(),
 	}
 }
 
@@ -137,11 +146,19 @@ func (s Spec) Validate() error {
 	if s.Workers < 0 {
 		return fmt.Errorf("worker count cannot be negative")
 	}
-	if s.HTTPPort < 1 || s.HTTPPort > 65535 {
-		return fmt.Errorf("http port %d is out of range", s.HTTPPort)
+	if s.Exposure.Enabled {
+		if s.HTTPPort < 1 || s.HTTPPort > 65535 {
+			return fmt.Errorf("http port %d is out of range", s.HTTPPort)
+		}
+		if s.HTTPSPort < 1 || s.HTTPSPort > 65535 {
+			return fmt.Errorf("https port %d is out of range", s.HTTPSPort)
+		}
+		if s.HTTPPort == s.HTTPSPort {
+			return fmt.Errorf("http and https host ports must differ (both %d)", s.HTTPPort)
+		}
 	}
-	if s.HTTPSPort < 1 || s.HTTPSPort > 65535 {
-		return fmt.Errorf("https port %d is out of range", s.HTTPSPort)
+	if err := s.Exposure.Validate(); err != nil {
+		return err
 	}
-	return nil
+	return validateApps(s.Apps)
 }

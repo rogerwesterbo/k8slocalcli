@@ -60,6 +60,11 @@ type Entry struct {
 	ArchiveInnerPath    string `json:"archiveInnerPath,omitempty"    yaml:"archiveInnerPath,omitempty"`
 	ChecksumsAsset      string `json:"checksumsAsset,omitempty"      yaml:"checksumsAsset,omitempty"`
 	CosignIdentityRegex string `json:"cosignIdentityRegex,omitempty" yaml:"cosignIdentityRegex,omitempty"`
+
+	// DownloadBase overrides where release assets are fetched from (a mirror,
+	// or a local server in tests); "{version}" is replaced. Never read from
+	// the remote index.
+	DownloadBase string `json:"-" yaml:"-"`
 }
 
 // FetchIndex downloads plugins.yaml from the resolved index URL and parses it.
@@ -178,5 +183,8 @@ func (e *Entry) CosignIdentity() string {
 // BaseDownloadURL returns the prefix under which release assets live for the
 // given tag — callers append the asset filename.
 func (e *Entry) BaseDownloadURL(version string) string {
+	if e.DownloadBase != "" {
+		return strings.TrimSuffix(strings.ReplaceAll(e.DownloadBase, "{version}", version), "/")
+	}
 	return fmt.Sprintf("https://github.com/%s/releases/download/%s", e.Repo, version)
 }

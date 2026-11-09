@@ -6,7 +6,7 @@ import (
 	"io"
 
 	"github.com/rogerwesterbo/k8slocalcli/internal/cluster"
-	"github.com/rogerwesterbo/k8slocalcli/internal/runner"
+	"github.com/rogerwesterbo/k8slocalcli/internal/engine"
 )
 
 // Several clusters can run side by side in Docker — kind puts every cluster on
@@ -56,22 +56,16 @@ func specPortRequests(spec cluster.Spec) []portRequest {
 	}
 }
 
-// hostPortOwner returns the name of a running container already publishing
-// hostPort, or "" when the port is free. Docker is the allocator here, so asking
-// it is both authoritative and cheap; binding a probe socket would not work
-// anyway, since ports below 1024 need root on macOS and would look taken.
+// hostPortOwner returns the container already publishing hostPort, or "".
 func hostPortOwner(ctx context.Context, hostPort int) (string, error) {
-	out, err := runner.New(nil).Capture(ctx, "docker", "ps",
-		"--filter", fmt.Sprintf("publish=%d", hostPort),
-		"--format", "{{.Names}}")
-	if err != nil {
-		return "", err
-	}
-	names := nonEmptyLines(out)
-	if len(names) == 0 {
-		return "", nil
-	}
-	return names[0], nil
+	return engine.Current().PortOwner(ctx, hostPort)
+}
+
+// unbindable reports whether a defaulted port must be skipped because the
+// engine cannot publish privileged ports (rootless engines). Explicit choices
+// are left alone so the engine reports the real error.
+func unbindable(eng engine.Engine, req portRequest) bool {
+	return !eng.PrivilegedPorts && req.Port == req.Default && req.Port < 1024
 }
 
 // explicitPortConflictError explains that a port the user asked for by name is
@@ -102,14 +96,24 @@ func noFreePortError(req portRequest) error {
 // than blocking creation, leaving the real diagnosis to CheckPrerequisites and
 // the provider's own error.
 func ResolveHostPorts(ctx context.Context, spec *cluster.Spec, out io.Writer) error {
+	if !spec.Exposure.Enabled {
+		return nil // nothing is published
+	}
+	eng := engine.Current()
+
 	// Ports claimed earlier in this same call, so the two ingress ports cannot
 	// be assigned the same number.
 	claimed := map[int]bool{}
 
 	for _, req := range specPortRequests(*spec) {
-		owner, err := hostPortOwner(ctx, req.Port)
-		if err != nil {
-			return nil // Docker unreachable: not our error to report.
+		var owner string
+		if unbindable(eng, req) {
+			owner = "(ports below 1024 need root with " + eng.Name + ")"
+		} else {
+			var err error
+			if owner, err = hostPortOwner(ctx, req.Port); err != nil {
+				return nil // engine unreachable: not our error to report.
+			}
 		}
 
 		if owner == "" && !claimed[req.Port] {
@@ -148,9 +152,30 @@ func ResolveHostPorts(ctx context.Context, spec *cluster.Spec, out io.Writer) er
 
 		claimed[picked] = true
 		req.Assign(spec, picked)
-		fmt.Fprintf(out, "ℹ️  Host port %d is in use by container %q; using %d instead (%s)\n",
-			req.Port, owner, picked, req.Flag)
+		reason := fmt.Sprintf("in use by container %q", owner)
+		if unbindable(eng, req) {
+			reason = owner
+		}
+		fmt.Fprintf(out, "ℹ️  Host port %d is unavailable (%s); using %d instead (%s)\n",
+			req.Port, reason, picked, req.Flag)
 	}
 
 	return nil
+}
+
+// GatewayHostPorts returns the host ports an existing cluster publishes to the
+// gateway NodePorts, and false when it was created without host exposure (or
+// by a version that mapped the ports elsewhere).
+func GatewayHostPorts(ctx context.Context, p Provider, name string) (httpPort, httpsPort int, ok bool) {
+	eng := engine.Current()
+	node := p.GatewayNode(name)
+	h, err := eng.PublishedPort(ctx, node, cluster.GatewayHTTPNodePort)
+	if err != nil {
+		return 0, 0, false
+	}
+	hs, err := eng.PublishedPort(ctx, node, cluster.GatewayHTTPSNodePort)
+	if err != nil {
+		return 0, 0, false
+	}
+	return h, hs, true
 }

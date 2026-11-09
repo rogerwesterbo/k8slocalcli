@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/rogerwesterbo/k8slocalcli/internal/cluster"
+	"github.com/rogerwesterbo/k8slocalcli/internal/engine"
 )
 
 func TestRegistry(t *testing.T) {
@@ -63,6 +64,7 @@ func TestKindConfig(t *testing.T) {
 		Workers:       3,
 		HTTPPort:      8080,
 		HTTPSPort:     8443,
+		Exposure:      cluster.DefaultExposure(),
 	}
 	cfg := kindConfig(spec, "kindest/node:test")
 
@@ -78,6 +80,31 @@ func TestKindConfig(t *testing.T) {
 	}
 	if !strings.Contains(cfg, "ingress-ready: \"true\"") {
 		t.Errorf("expected ingress-ready label:\n%s", cfg)
+	}
+	// Host ports go to the gateway NodePorts, not the node's 80/443.
+	if !strings.Contains(cfg, "containerPort: 30080\n        hostPort: 8080") ||
+		!strings.Contains(cfg, "containerPort: 30443\n        hostPort: 8443") {
+		t.Errorf("expected host ports mapped to the gateway NodePorts:\n%s", cfg)
+	}
+}
+
+// Without exposure nothing is published, so a second cluster never competes
+// for host ports, and the user was warned that this cannot be undone.
+func TestKindConfigNoExposure(t *testing.T) {
+	spec := cluster.Spec{Name: "x", ControlPlanes: 2, HTTPPort: 80, HTTPSPort: 443}
+	cfg := kindConfig(spec, "img")
+	if strings.Contains(cfg, "extraPortMappings") || strings.Contains(cfg, "ingress-ready") {
+		t.Errorf("expected no port mappings without exposure:\n%s", cfg)
+	}
+	if strings.Count(cfg, "role: control-plane") != 2 {
+		t.Errorf("expected 2 control-plane entries:\n%s", cfg)
+	}
+}
+
+func TestTalosExposedPorts(t *testing.T) {
+	got := talosExposedPorts(cluster.Spec{HTTPPort: 8080, HTTPSPort: 8443})
+	if want := "8080:30080/tcp,8443:30443/tcp"; got != want {
+		t.Errorf("talosExposedPorts = %q, want %q", got, want)
 	}
 }
 
@@ -246,21 +273,6 @@ func TestKubernetesVersions(t *testing.T) {
 	// absent or unrecognised).
 	if tv := NewTalos().KubernetesVersions(context.Background()); len(tv) == 0 {
 		t.Error("expected talos to report versions")
-	}
-}
-
-func TestParseHostPort(t *testing.T) {
-	cases := map[string]string{
-		"0.0.0.0:64659":             "64659",
-		"[::]:64659":                "64659",
-		"0.0.0.0:64659\n[::]:64659": "64659",
-		"":                          "",
-		"no port here":              "",
-	}
-	for in, want := range cases {
-		if got := parseHostPort(in); got != want {
-			t.Errorf("parseHostPort(%q) = %q, want %q", in, got, want)
-		}
 	}
 }
 
@@ -474,5 +486,22 @@ func TestFilterTalosContainers(t *testing.T) {
 	want := []string{"test-controlplane-1", "test-worker-1"}
 	if !slices.Equal(got, want) {
 		t.Errorf("filterTalosContainers = %v, want %v", got, want)
+	}
+}
+
+// A rootless engine cannot publish 80/443, so defaulted ports must skip
+// straight to the fallbacks while explicit choices are left to fail loudly.
+func TestUnbindable(t *testing.T) {
+	rootless := engine.Engine{Name: "rootless", Binary: "x", PrivilegedPorts: false}
+	http := specPortRequests(cluster.Spec{HTTPPort: 80, HTTPSPort: 443})[0]
+	if !unbindable(rootless, http) {
+		t.Error("defaulted port 80 should be unbindable on a rootless engine")
+	}
+	if unbindable(engine.Docker, http) {
+		t.Error("Docker can publish port 80")
+	}
+	explicit := specPortRequests(cluster.Spec{HTTPPort: 81, HTTPSPort: 443})[0]
+	if unbindable(rootless, explicit) {
+		t.Error("explicit ports are never skipped")
 	}
 }

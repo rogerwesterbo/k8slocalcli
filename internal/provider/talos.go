@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/rogerwesterbo/k8slocalcli/internal/cluster"
+	"github.com/rogerwesterbo/k8slocalcli/internal/engine"
 	"github.com/rogerwesterbo/k8slocalcli/internal/runner"
 )
 
@@ -28,6 +30,9 @@ func (t *Talos) Name() cluster.Provider { return cluster.ProviderTalos }
 // Context implements Provider. talosctl names the admin context "admin@<name>".
 func (t *Talos) Context(name string) string { return "admin@" + name }
 
+// GatewayNode implements Provider: the Docker backend's init node.
+func (t *Talos) GatewayNode(name string) string { return name + "-controlplane-1" }
+
 // KubernetesVersions implements Provider, returning the Kubernetes versions
 // supported by the installed talosctl (newest first).
 func (t *Talos) KubernetesVersions(ctx context.Context) []string {
@@ -37,7 +42,7 @@ func (t *Talos) KubernetesVersions(ctx context.Context) []string {
 // CheckPrerequisites implements Provider.
 func (t *Talos) CheckPrerequisites() error {
 	var missing []string
-	for _, tool := range []string{"talosctl", "docker"} {
+	for _, tool := range []string{"talosctl", engine.Current().Binary} {
 		if !runner.LookPath(tool) {
 			missing = append(missing, tool)
 		}
@@ -92,7 +97,9 @@ func (t *Talos) Create(ctx context.Context, spec cluster.Spec, out io.Writer) er
 		"--kubernetes-version", version,
 		"--memory-controlplanes", "2048MB",
 		"--memory-workers", "2048MB",
-		"--exposed-ports", fmt.Sprintf("%d:80/tcp,%d:443/tcp", spec.HTTPPort, spec.HTTPSPort),
+	}
+	if spec.Exposure.Enabled {
+		args = append(args, "--exposed-ports", talosExposedPorts(spec))
 	}
 
 	// Every Talos docker cluster defaults to the same 10.5.0.0/24 and Docker
@@ -158,6 +165,14 @@ func (t *Talos) Create(ctx context.Context, spec cluster.Spec, out io.Writer) er
 
 	fmt.Fprintf(out, "\n✅ Talos cluster %q is ready\n", spec.Name)
 	return nil
+}
+
+// talosExposedPorts publishes the gateway host ports to the fixed gateway
+// NodePorts on the init node (talosctl's <hostPort>:<containerPort>/<proto>).
+func talosExposedPorts(spec cluster.Spec) string {
+	return fmt.Sprintf("%d:%d/tcp,%d:%d/tcp",
+		spec.HTTPPort, cluster.GatewayHTTPNodePort,
+		spec.HTTPSPort, cluster.GatewayHTTPSNodePort)
 }
 
 // writeTempPatch writes a machine-config patch to a temporary file for
@@ -310,7 +325,7 @@ func (t *Talos) talosContextFor(ctx context.Context, name string) string {
 	if err != nil {
 		return ""
 	}
-	port, _ := dockerHostPort(ctx, name+"-controlplane-1", talosAPIPort)
+	port, _ := nodeHostPort(ctx, name+"-controlplane-1", talosAPIPort)
 	return pickTalosContext(parseTalosContexts(out), name, port)
 }
 
@@ -346,7 +361,7 @@ func (t *Talos) removeStaleTalosContexts(ctx context.Context, name string, out i
 	if err != nil {
 		return
 	}
-	livePort, _ := dockerHostPort(ctx, name+"-controlplane-1", talosAPIPort)
+	livePort, _ := nodeHostPort(ctx, name+"-controlplane-1", talosAPIPort)
 	clusters, _ := t.List(ctx)
 	for _, c := range staleTalosContexts(parseTalosContexts(list), name, livePort, clusters) {
 		_ = runner.New(out).Run(ctx, "talosctl", "config", "remove", c, "--noconfirm")
@@ -418,7 +433,7 @@ func parseTalosContexts(out string) []talosContext {
 // the Docker backend forwards the API server (6443) to a localhost port
 // instead. kubeconfigPath selects the file to edit (empty = the default).
 func fixKubeconfigServer(ctx context.Context, r *runner.Runner, name, kubeconfigPath string, out io.Writer) error {
-	port, err := dockerHostPort(ctx, name+"-controlplane-1", "6443")
+	port, err := nodeHostPort(ctx, name+"-controlplane-1", "6443")
 	if err != nil {
 		return err
 	}
@@ -433,33 +448,18 @@ func fixKubeconfigServer(ctx context.Context, r *runner.Runner, name, kubeconfig
 	return r.Run(ctx, "kubectl", args...)
 }
 
-// dockerHostPort returns the host port mapped to containerPort/tcp on the named
-// container (e.g. "0.0.0.0:64659" -> "64659").
-func dockerHostPort(ctx context.Context, container, containerPort string) (string, error) {
-	r := runner.New(nil)
-	out, err := r.Capture(ctx, "docker", "port", container, containerPort+"/tcp")
+// nodeHostPort returns the host port the container engine mapped to
+// containerPort/tcp on the named node container (e.g. "64659").
+func nodeHostPort(ctx context.Context, container, containerPort string) (string, error) {
+	cp, err := strconv.Atoi(containerPort)
+	if err != nil {
+		return "", fmt.Errorf("invalid container port %q", containerPort)
+	}
+	hp, err := engine.Current().PublishedPort(ctx, container, cp)
 	if err != nil {
 		return "", err
 	}
-	port := parseHostPort(out)
-	if port == "" {
-		return "", fmt.Errorf("no host port mapped to %s/tcp on %s", containerPort, container)
-	}
-	return port, nil
-}
-
-var hostPortRe = regexp.MustCompile(`:(\d+)\s*$`)
-
-// parseHostPort extracts the port from `docker port` output, handling both the
-// "0.0.0.0:64659" and "[::]:64659" forms (taking the first mapping).
-func parseHostPort(dockerPortOutput string) string {
-	for _, line := range strings.Split(dockerPortOutput, "\n") {
-		line = strings.TrimSpace(line)
-		if m := hostPortRe.FindStringSubmatch(line); m != nil {
-			return m[1]
-		}
-	}
-	return ""
+	return strconv.Itoa(hp), nil
 }
 
 // Delete implements Provider.
@@ -478,9 +478,9 @@ func (t *Talos) Delete(ctx context.Context, name string, out io.Writer) error {
 
 	// Best-effort cleanup of any leftover containers/network for this cluster.
 	for _, c := range talosContainers(ctx, name) {
-		_ = r.Run(ctx, "docker", "rm", "-f", c)
+		_ = r.Run(ctx, engine.Current().Binary, "rm", "-f", c)
 	}
-	_ = r.Run(ctx, "docker", "network", "rm", name)
+	_ = r.Run(ctx, engine.Current().Binary, "network", "rm", name)
 
 	// Remove the cluster state directory.
 	_ = os.RemoveAll(filepath.Join(state, name))
@@ -504,8 +504,8 @@ func (t *Talos) Leftovers(ctx context.Context, name string) []string {
 	for _, c := range talosContainers(ctx, name) {
 		found = append(found, "container "+c)
 	}
-	if runner.LookPath("docker") {
-		label, err := runner.New(nil).Capture(ctx, "docker", "network", "inspect", name,
+	if engine.Current().Available() {
+		label, err := runner.New(nil).Capture(ctx, engine.Current().Binary, "network", "inspect", name,
 			"--format", `{{index .Labels "talos.cluster.name"}}`)
 		if err == nil && label == name {
 			found = append(found, "docker network "+name)
@@ -519,7 +519,7 @@ func (t *Talos) Leftovers(ctx context.Context, name string) []string {
 // substring match, so results are narrowed to an exact prefix: otherwise
 // cluster "test" would also match "mytest-controlplane-1".
 func talosContainers(ctx context.Context, name string) []string {
-	if !runner.LookPath("docker") {
+	if !engine.Current().Available() {
 		return nil
 	}
 	names, err := dockerNames(ctx, name+"-")
@@ -542,7 +542,7 @@ func filterTalosContainers(names []string, cluster string) []string {
 // List implements Provider. Talos Docker clusters are discovered by their
 // "<name>-controlplane-1" container.
 func (t *Talos) List(ctx context.Context) ([]string, error) {
-	if !runner.LookPath("docker") {
+	if !engine.Current().Available() {
 		return nil, nil
 	}
 	names, err := dockerNames(ctx, "controlplane-1")
@@ -597,7 +597,7 @@ func parseTalosMajorMinor(versionOutput string) string {
 // given substring filter.
 func dockerNames(ctx context.Context, nameFilter string) ([]string, error) {
 	r := runner.New(nil)
-	out, err := r.Capture(ctx, "docker", "ps", "-a", "--filter", "name="+nameFilter, "--format", "{{.Names}}")
+	out, err := r.Capture(ctx, engine.Current().Binary, "ps", "-a", "--filter", "name="+nameFilter, "--format", "{{.Names}}")
 	if err != nil {
 		return nil, err
 	}

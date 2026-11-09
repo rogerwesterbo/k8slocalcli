@@ -33,6 +33,10 @@ type InstallOptions struct {
 	// SkipCosign disables Sigstore signature verification. The installer also
 	// silently skips cosign if the cosign binary is not on PATH.
 	SkipCosign bool
+	// BinaryName is the installed file name. Empty means
+	// "k8slocalcli-<name>" (the plugin convention); `k8slocalcli upgrade` sets
+	// it to the running binary's own name.
+	BinaryName string
 	// Stdout/Stderr receive human-readable progress messages. Nil writes to
 	// os.Stderr (progress) / are suppressed (stdout).
 	Stdout io.Writer
@@ -132,9 +136,12 @@ func Install(ctx context.Context, entry *Entry, opts InstallOptions) (*State, er
 
 	// On Unix, the install destination is `k8slocalcli-<name>` next to
 	// k8slocalcli itself. On Windows, append .exe.
-	dstName := "k8slocalcli-" + entry.Name
-	if goos == "windows" {
-		dstName += ".exe"
+	dstName := opts.BinaryName
+	if dstName == "" {
+		dstName = "k8slocalcli-" + entry.Name
+		if goos == "windows" {
+			dstName += ".exe"
+		}
 	}
 	dst := filepath.Join(prefix, dstName)
 	if err := installFile(extractedBinary, dst); err != nil {

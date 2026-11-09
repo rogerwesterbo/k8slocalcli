@@ -58,8 +58,32 @@ Understanding these four seams is enough to be productive:
   focused field index. It returns a `cluster.Spec` and never creates clusters
   itself.
 
-- **`internal/cli` (`root.go`, `kubeconfig.go`)** — cobra tree
-  (`create`/`list`/`delete`/`kubeconfig`). `create` launches the TUI **only when
+- **`internal/apps`** — everything installed *after* `Provider.Create`, via
+  kubectl/helm only (never imports `provider`; callers pass an `apps.Target`).
+  `SetupExposure` installs Gateway API CRDs → controller → TLS secret →
+  shared Gateway; `Install` installs a catalog `App` and adds its route.
+  Adding an app = an `App` value in `catalog` (methods, namespace, `Expose`,
+  install func). Adding a gateway controller = implement `GatewayController`
+  (contract in `gateway.go`), add it to `controllers` and
+  `cluster.GatewayControllers`.
+
+- **`internal/progress`** — `Reporter.Step` runs a long step: on a terminal a
+  single redrawn line (spinner · elapsed · status) with command output held
+  back; otherwise (CI, pipes, `--verbose`) plain streamed output plus status
+  lines. `apps.Env.step` wires it to a live pod summary (`summarizePods`, which
+  adds the corporate-CA hint on x509 pull errors). Terminal detection uses the
+  window size, not `ModeCharDevice` (`/dev/null` is a char device). Anything
+  that prompts must run outside a step, or the prompt is hidden.
+
+- **`internal/engine`** — the container-engine seam (Docker only). Engine CLI
+  calls (`ps`, `port`, `network`, `rm`) go through `engine.Current()`, never a
+  hardcoded `"docker"`; the package doc lists what a Podman engine needs.
+
+- **`internal/cli` (`root.go`, `kubeconfig.go`, `app.go`)** — cobra tree
+  (`create`/`list`/`delete`/`kubeconfig`/`info`/`app`). `info` is read-only and
+  stores nothing: apps are found by `App.Deployment`, hosts from their route,
+  credentials via `App.notes` — keep it that way rather than caching secrets
+  under `~/.k8slocalcli` (that dir's `clusters/` is talosctl state, talos-only). `create` launches the TUI **only when
   `--name` is empty**; otherwise it runs non-interactively from flags. `delete`
   and `kubeconfig` auto-detect the owning provider by asking each
   `Provider.Exists` (or show a picker with no name). `kubeconfig` prints
@@ -85,7 +109,11 @@ Understanding these four seams is enough to be productive:
   `--ca-cert` files plus `~/.k8slocalcli/ca-certificates/*.pem|*.crt` (for
   TLS-intercepting proxies — otherwise etcd's image pull fails with x509 and
   bootstrap hangs); then the CNI patch. Each goes as its own `--config-patch`.
-  kind ignores `--ca-cert` (warns) for now.
+  **kind** gets the same bundle right after `kind create cluster`
+  (`kindTrustCAs`: `docker cp` to `/usr/local/share/ca-certificates`,
+  `update-ca-certificates`, restart containerd — it caches system roots), before
+  the CNI and apps pull anything; Kubernetes' own images are preloaded in the
+  node image, so creation itself never needs it.
 - **talosconfig contexts**: talosctl renames a new context to `<name>-N` when
   `<name>` already exists (e.g. from a failed attempt), and the old one points
   at a dead port. `talosContextFor` therefore picks the context whose endpoint
@@ -95,8 +123,35 @@ Understanding these four seams is enough to be productive:
 - **Talos Docker backend = single control plane.** `talosctl cluster create
   docker` ignores `--controlplanes`; the talos provider warns and creates one if
   more are requested. Talos state lives in `~/.k8slocalcli/clusters`.
-- **kind** puts the `ingress-ready` label and the `80`/`443` host port mappings
-  on the *first* control-plane node only (`kindContext`/`kindConfig`).
+- **Host exposure** (`Spec.Exposure`, default on): kind `extraPortMappings` /
+  talos `--exposed-ports` publish `HTTPPort`/`HTTPSPort` to the fixed NodePorts
+  `cluster.GatewayHTTPNodePort`/`GatewayHTTPSNodePort` (30080/30443) on the
+  first control plane only — not to container 80/443 — so any controller can
+  serve them via its Service. Ports cannot be added after creation,
+  hence `Spec.Warnings()` (printed before creating, shown live in the TUI).
+  Existing clusters' ports are read back with `provider.GatewayHostPorts`
+  (`docker port <GatewayNode> 30080/tcp`).
+- **Gateway API CRDs have one owner**: `SetupExposure` installs the upstream
+  bundle at the controller's `GatewayAPIVersion()` on the chosen channel.
+  Envoy Gateway bundles its own (experimental) copy in both install paths, so
+  Helm uses `crds.enabled=false` + `envoy-gateway-crds.yaml` (EG-only CRDs),
+  and manifest strips the bundle with `withoutGatewayAPIResources`. Pins:
+  EG v1.9.3 ↔ Gateway API v1.6.1 (EG's go.mod) — bump them together. The
+  `EnvoyProxy` makes the Service NodePort, **pins the Envoy pods to the
+  gateway node** (`kubernetes.io/hostname` = `Provider.GatewayNode`, which is
+  also the node name; tolerates the control-plane taint) and uses
+  `externalTrafficPolicy: Local`. Never let host traffic be forwarded to another
+  node: Docker Desktop's port forwarder (source `192.168.65.1`) delivers
+  checksum-offloaded packets, and after kube-proxy NAT + flannel VXLAN the inner
+  TCP checksum is never filled in, so the remote node drops every SYN
+  (`tcpdump -vv` shows `cksum ... incorrect`) and curl hangs. It only shows with
+  workers, since with none the Envoy pod is already local. The TLS secret must exist before the Gateway, or the
+  HTTPS listener is not programmed and the NodePort patch has no port to hit.
+  Envoy ignores the port in Host matching, so `app.localtest.me:8080` routes.
+- **TLS**: self-signed is generated in Go per cluster. Verified = local CA in
+  `~/.k8slocalcli/ca` (0600, name-constrained to `localtest.me`, shared by all
+  clusters) → cert-manager CA `ClusterIssuer` → `Certificate`; the CA is added
+  to the macOS login keychain only after a prompt (never in tests).
 - **CNI** (`internal/provider/cni.go`): default keeps the provider's built-in CNI.
   Cilium/Calico/Kube-OVN disable it (kind `disableDefaultCNI`; Talos machine-config patch
   from `talosCNIPatch`, version-dependent: talosctl 1.14+ deletes the
@@ -142,10 +197,30 @@ Understanding these four seams is enough to be productive:
   index 0 = latest); the TUI uses it for the version field, and the create
   command pre-computes a `map[provider][]versions` to pass into `tui.Run`.
 
+## Releases and docs
+
+- `install.sh` + `.github/workflows/release.yml` (tag `v*`) publish
+  `k8slocalcli-<tag>-<os>-<arch>.tar.gz` (dir `k8slocalcli-<tag>-<os>-<arch>/`
+  inside), `k8slocalcli-<tag>-SHA256SUMS` and `<archive>.cosign.bundle` — the
+  same layout `internal/pluginmgr` expects of plugins. Keep the three in sync.
+  `install.sh --base-url file://...` tests it without a release.
+- `k8slocalcli upgrade` (`cli/upgrade.go`) reuses `pluginmgr.Install` with
+  `selfEntry()` (same asset names) and `BinaryName` = the running binary, so it
+  replaces itself atomically next to where it lives; it refuses `go run` and
+  Homebrew paths. `K8SLOCALCLI_RELEASE_URL=http://host/{version}` points it at
+  a mirror — that is how to test it before a release exists. The passive
+  notice (`startUpdateCheck` in `Execute`) runs only for `vX.Y.Z` builds on a
+  terminal, caches GitHub's answer in `~/.k8slocalcli/update-check.json` for
+  24h, waits at most 1.5s after the command, and is off with
+  `K8SLOCALCLI_NO_UPDATE_CHECK`.
+- README is need-to-know (install, usage, testing); internals go in
+  `docs/how-it-works.md`, maintainer gotchas here.
+
 ## Testing notes
 
-End-to-end creation requires a running Docker daemon and is **not** covered by
-`go test` (which only exercises pure logic: spec validation, registry, kind
+End-to-end creation (and everything in `internal/apps` that runs kubectl/helm)
+requires a running Docker daemon and is **not** covered by `go test` (which only exercises pure logic: spec validation, registry, kind
 config generation, version lookups, the runner against `echo`/`false`). Verify
 real cluster creation manually with Docker running:
-`./bin/k8slocalcli create --name demo --provider kind --workers 1`.
+`./bin/k8slocalcli create --name demo --provider kind --workers 1`, then
+`curl http://argocd.localtest.me[:port]` after `--app argocd`.

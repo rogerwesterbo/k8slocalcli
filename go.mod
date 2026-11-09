@@ -5,6 +5,7 @@ go 1.27.3
 require (
 	github.com/gizak/termui/v3 v3.1.0
 	github.com/spf13/cobra v1.10.2
+	golang.org/x/sys v0.49.0
 	sigs.k8s.io/yaml v1.6.0
 )
 
@@ -16,5 +17,4 @@ require (
 	github.com/nsf/termbox-go v1.1.2 // indirect
 	github.com/spf13/pflag v1.1.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.5 // indirect
-	golang.org/x/sys v0.49.0 // indirect
 )

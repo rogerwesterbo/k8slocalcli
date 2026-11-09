@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/rogerwesterbo/k8slocalcli/internal/cluster"
+	"github.com/rogerwesterbo/k8slocalcli/internal/engine"
 	"github.com/rogerwesterbo/k8slocalcli/internal/runner"
 )
 
@@ -23,6 +24,10 @@ func (k *Kind) Name() cluster.Provider { return cluster.ProviderKind }
 // Context implements Provider. kind prefixes contexts with "kind-".
 func (k *Kind) Context(name string) string { return "kind-" + name }
 
+// GatewayNode implements Provider: kind names the first control plane
+// "<name>-control-plane".
+func (k *Kind) GatewayNode(name string) string { return name + "-control-plane" }
+
 // KubernetesVersions implements Provider, returning the pinned kind node-image
 // versions newest first.
 func (k *Kind) KubernetesVersions(_ context.Context) []string {
@@ -36,7 +41,7 @@ func (k *Kind) KubernetesVersions(_ context.Context) []string {
 // CheckPrerequisites implements Provider.
 func (k *Kind) CheckPrerequisites() error {
 	var missing []string
-	for _, tool := range []string{"kind", "docker"} {
+	for _, tool := range []string{"kind", engine.Current().Binary} {
 		if !runner.LookPath(tool) {
 			missing = append(missing, tool)
 		}
@@ -56,8 +61,9 @@ func (k *Kind) Create(ctx context.Context, spec cluster.Spec, out io.Writer) err
 		fmt.Fprintf(out, "⚠️  Kubernetes version %q is not pinned; falling back to %s\n", spec.K8sVersion, version)
 	}
 
-	if len(spec.CACerts) > 0 {
-		fmt.Fprintf(out, "⚠️  --ca-cert is not supported for kind yet; ignoring %d certificate file(s)\n", len(spec.CACerts))
+	bundle, sources, err := caBundle(spec.CACerts)
+	if err != nil {
+		return err
 	}
 
 	configYAML := kindConfig(spec, image)
@@ -89,6 +95,15 @@ func (k *Kind) Create(ctx context.Context, spec cluster.Spec, out io.Writer) err
 
 	if err := r.Run(ctx, "kind", "create", "cluster", "--name", spec.Name, "--config", cfgFile.Name()); err != nil {
 		return fmt.Errorf("could not create kind cluster: %w", err)
+	}
+
+	// Before anything else pulls images (CNI, apps): behind a TLS-intercepting
+	// proxy every pull from an intercepted registry fails with x509 otherwise.
+	if bundle != "" {
+		fmt.Fprintf(out, "\n🔐 Trusting extra CA certificates from: %s\n", strings.Join(sources, ", "))
+		if err := kindTrustCAs(ctx, spec.Name, bundle, out); err != nil {
+			return err
+		}
 	}
 
 	fmt.Fprintf(out, "\n🔄 Switching kubectl context to %s\n", k.Context(spec.Name))
@@ -171,8 +186,54 @@ func (k *Kind) Exists(ctx context.Context, name string) (bool, error) {
 	return false, nil
 }
 
-// kindConfig renders a kind cluster config. The first control-plane node gets
-// host port mappings for ingress; additional nodes are plain.
+// kindCAPath is where the extra CA bundle goes on each kind node; the node
+// image is Debian, so update-ca-certificates folds it into the system roots.
+const kindCAPath = "/usr/local/share/ca-certificates/k8slocalcli.crt"
+
+// kindTrustCAs adds bundle to every node's system trust store and restarts
+// containerd, whose Go TLS client only reads the system roots at startup.
+// Running containers survive the restart (they live in containerd-shim).
+// Kubernetes' own images are preloaded in the node image, so the cluster comes
+// up without this; it is image pulls afterwards that need it.
+func kindTrustCAs(ctx context.Context, name, bundle string, out io.Writer) error {
+	nodesOut, err := runner.New(nil).Capture(ctx, "kind", "get", "nodes", "--name", name)
+	if err != nil {
+		return fmt.Errorf("listing kind nodes: %w", err)
+	}
+
+	f, err := os.CreateTemp("", "k8slocalcli-ca-*.crt")
+	if err != nil {
+		return fmt.Errorf("writing CA bundle: %w", err)
+	}
+	defer func() { _ = os.Remove(f.Name()) }()
+	if _, err := f.WriteString(bundle); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("writing CA bundle: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("writing CA bundle: %w", err)
+	}
+
+	eng := engine.Current().Binary
+	r := runner.New(out)
+	for _, node := range nonEmptyLines(nodesOut) {
+		for _, args := range [][]string{
+			{"cp", f.Name(), node + ":" + kindCAPath},
+			{"exec", node, "update-ca-certificates"},
+			{"exec", node, "systemctl", "restart", "containerd"},
+		} {
+			if err := r.Run(ctx, eng, args...); err != nil {
+				return fmt.Errorf("trusting CA certificates on %s: %w", node, err)
+			}
+		}
+	}
+	return nil
+}
+
+// kindConfig renders a kind cluster config. With host exposure on, the first
+// control-plane node publishes the gateway host ports to the fixed gateway
+// NodePorts; additional nodes are plain. Port mappings cannot be added to a kind
+// node after creation, which is why exposure is decided up front.
 func kindConfig(spec cluster.Spec, image string) string {
 	var b strings.Builder
 	b.WriteString("kind: Cluster\n")
@@ -186,13 +247,13 @@ func kindConfig(spec cluster.Spec, image string) string {
 	b.WriteString("nodes:\n")
 
 	for i := 0; i < spec.ControlPlanes; i++ {
-		if i == 0 {
+		if i == 0 && spec.Exposure.Enabled {
 			fmt.Fprintf(&b, "  - role: control-plane\n    image: %s\n", image)
 			b.WriteString("    labels:\n")
 			b.WriteString("      ingress-ready: \"true\"\n")
 			b.WriteString("    extraPortMappings:\n")
-			fmt.Fprintf(&b, "      - containerPort: 80\n        hostPort: %d\n        protocol: TCP\n", spec.HTTPPort)
-			fmt.Fprintf(&b, "      - containerPort: 443\n        hostPort: %d\n        protocol: TCP\n", spec.HTTPSPort)
+			fmt.Fprintf(&b, "      - containerPort: %d\n        hostPort: %d\n        protocol: TCP\n", cluster.GatewayHTTPNodePort, spec.HTTPPort)
+			fmt.Fprintf(&b, "      - containerPort: %d\n        hostPort: %d\n        protocol: TCP\n", cluster.GatewayHTTPSNodePort, spec.HTTPSPort)
 		} else {
 			fmt.Fprintf(&b, "  - role: control-plane\n    image: %s\n", image)
 		}

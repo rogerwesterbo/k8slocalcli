@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/rogerwesterbo/k8slocalcli/internal/engine"
 	"github.com/rogerwesterbo/k8slocalcli/internal/runner"
 )
 
@@ -31,7 +32,7 @@ const (
 // than guessing.
 func dockerSubnets(ctx context.Context) ([]string, error) {
 	r := runner.New(nil)
-	ids, err := r.Capture(ctx, "docker", "network", "ls", "-q")
+	ids, err := r.Capture(ctx, engine.Current().Binary, "network", "ls", "-q")
 	if err != nil {
 		return nil, err
 	}
@@ -42,7 +43,7 @@ func dockerSubnets(ctx context.Context) ([]string, error) {
 
 	args := append([]string{"network", "inspect"}, networks...)
 	args = append(args, "--format", "{{range .IPAM.Config}}{{.Subnet}} {{end}}")
-	out, err := r.Capture(ctx, "docker", args...)
+	out, err := r.Capture(ctx, engine.Current().Binary, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -5,11 +5,14 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
+	"github.com/rogerwesterbo/k8slocalcli/internal/apps"
 	"github.com/rogerwesterbo/k8slocalcli/internal/cluster"
+	"github.com/rogerwesterbo/k8slocalcli/internal/progress"
 	"github.com/rogerwesterbo/k8slocalcli/internal/provider"
 	"github.com/rogerwesterbo/k8slocalcli/internal/runner"
 	"github.com/rogerwesterbo/k8slocalcli/internal/tui"
@@ -17,6 +20,20 @@ import (
 
 // version is set via -ldflags at build time.
 var version = "dev"
+
+// verbose (--verbose) streams every command's output instead of showing
+// spinners.
+var verbose bool
+
+// newReporter shows spinners only on an interactive terminal and without
+// --verbose; otherwise output streams as plain logs.
+func newReporter(out io.Writer) *progress.Reporter {
+	live, width := false, 0
+	if f, ok := out.(*os.File); ok && !verbose {
+		live, width = progress.Terminal(f)
+	}
+	return progress.New(out, live, width)
+}
 
 // Execute builds and runs the root command.
 func Execute(ctx context.Context) error {
@@ -29,7 +46,10 @@ func Execute(ctx context.Context) error {
 	if handled, err := maybeDispatchPlugin(root); handled {
 		return err
 	}
-	return root.ExecuteContext(ctx)
+	pendingNotice := startUpdateCheck(ctx, os.Args[1:])
+	err := root.ExecuteContext(ctx)
+	printUpdateNotice(os.Stderr, pendingNotice())
+	return err
 }
 
 func newRootCmd() *cobra.Command {
@@ -43,7 +63,8 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		Version:       version,
 	}
-	root.AddCommand(newCreateCmd(), newListCmd(), newDeleteCmd(), newKubeconfigCmd(), newPluginCmd())
+	root.PersistentFlags().BoolVarP(&verbose, "verbose", "v", false, "show the full output of every command instead of progress spinners")
+	root.AddCommand(newCreateCmd(), newListCmd(), newDeleteCmd(), newKubeconfigCmd(), newInfoCmd(), newAppCmd(), newPluginCmd(), newUpgradeCmd())
 	return root
 }
 
@@ -86,14 +107,34 @@ func newCreateCmd() *cobra.Command {
 	flags.IntVar(&spec.Workers, "workers", spec.Workers, "number of worker nodes")
 	flags.StringVar(&spec.K8sVersion, "k8s-version", "", "Kubernetes version (default: provider's newest)")
 	cniFlag := flags.String("cni", string(spec.CNI), "CNI: default, cilium, calico or kube-ovn")
-	flags.IntVar(&spec.HTTPPort, "http-port", spec.HTTPPort, "host port mapped to ingress :80")
-	flags.IntVar(&spec.HTTPSPort, "https-port", spec.HTTPSPort, "host port mapped to ingress :443")
-	flags.StringArrayVar(&spec.CACerts, "ca-cert", nil, "extra CA certificate (PEM file) for the nodes to trust, e.g. a corporate proxy root CA; repeatable (talos). Files in ~/.k8slocalcli/ca-certificates are always added")
+	flags.BoolVar(&spec.Exposure.Enabled, "expose", spec.Exposure.Enabled, "publish gateway ports so services can be reached from this machine (cannot be enabled after creation)")
+	flags.IntVar(&spec.HTTPPort, "http-port", spec.HTTPPort, "host port for the gateway's HTTP listener")
+	flags.IntVar(&spec.HTTPSPort, "https-port", spec.HTTPSPort, "host port for the gateway's HTTPS listener")
+	controllerFlag := flags.String("gateway-controller", string(spec.Exposure.Controller), "Gateway API implementation: envoy")
+	gatewayMethodFlag := flags.String("gateway-method", string(spec.Exposure.ControllerMethod), "install the gateway controller via helm or manifest")
+	channelFlag := flags.String("gateway-channel", string(spec.Exposure.Channel), "Gateway API CRD channel: standard or experimental")
+	tlsFlag := flags.String("tls", string(spec.Exposure.TLS), "HTTPS certificates: self-signed, or verified (cert-manager + a local CA trusted by this machine)")
+	certManagerMethodFlag := flags.String("cert-manager-method", string(spec.Exposure.CertManagerMethod), "install cert-manager via helm or manifest (with --tls verified)")
+	appFlags := flags.StringArray("app", nil, "install an app: name[:method][=hostname], e.g. argocd, argocd:manifest=cd.localtest.me; repeatable (list: k8slocalcli app list)")
+	flags.StringArrayVar(&spec.CACerts, "ca-cert", nil, "extra CA certificate (PEM file) for the nodes to trust, e.g. a corporate proxy root CA; repeatable. Files in ~/.k8slocalcli/ca-certificates are always added")
 	flags.BoolVarP(&assumeYes, "yes", "y", false, "answer yes to prompts (replace an existing cluster or remove leftovers of the same name)")
 
 	cmd.PreRunE = func(_ *cobra.Command, _ []string) error {
 		spec.Provider = cluster.Provider(*providerFlag)
 		spec.CNI = cluster.CNI(*cniFlag)
+		spec.Exposure.Controller = cluster.GatewayController(*controllerFlag)
+		spec.Exposure.ControllerMethod = cluster.InstallMethod(*gatewayMethodFlag)
+		spec.Exposure.Channel = cluster.GatewayChannel(*channelFlag)
+		spec.Exposure.TLS = cluster.TLSMode(*tlsFlag)
+		spec.Exposure.CertManagerMethod = cluster.InstallMethod(*certManagerMethodFlag)
+		spec.Apps = nil
+		for _, a := range *appFlags {
+			req, err := apps.ParseRequest(a)
+			if err != nil {
+				return fmt.Errorf("--app %s: %w", a, err)
+			}
+			spec.Apps = append(spec.Apps, req)
+		}
 		return nil
 	}
 
@@ -112,6 +153,17 @@ func runCreate(ctx context.Context, spec cluster.Spec, ask *prompter, out io.Wri
 	if err := p.CheckPrerequisites(); err != nil {
 		return err
 	}
+	// kubectl/helm are only used after the cluster exists; check now so a
+	// fresh machine does not end up with a half-configured cluster.
+	if err := apps.MissingTools(spec); err != nil {
+		return err
+	}
+
+	// Shown before anything is created: these choices are fixed for the life
+	// of the cluster.
+	for _, w := range spec.Warnings() {
+		fmt.Fprintf(out, "⚠️  %s\n", w)
+	}
 
 	if err := clearExisting(ctx, p, spec, ask, out); err != nil {
 		return err
@@ -129,9 +181,32 @@ func runCreate(ctx context.Context, spec cluster.Spec, ask *prompter, out io.Wri
 		return err
 	}
 
+	env := &apps.Env{
+		Target: apps.Target{
+			Name:        spec.Name,
+			KubeContext: p.Context(spec.Name),
+			Exposed:     spec.Exposure.Enabled,
+			GatewayNode: p.GatewayNode(spec.Name),
+			HTTPPort:    spec.HTTPPort,
+			HTTPSPort:   spec.HTTPSPort,
+		},
+		Out:      out,
+		Confirm:  ask.confirm,
+		Progress: newReporter(out),
+	}
+	if err := apps.SetupExposure(ctx, env, spec.Exposure); err != nil {
+		return fmt.Errorf("cluster %q is running, but setting up host exposure failed: %w", spec.Name, err)
+	}
+	for _, req := range spec.Apps {
+		if err := apps.Install(ctx, env, req); err != nil {
+			return fmt.Errorf("cluster %q is running, but %w\nretry with: k8slocalcli app install %s --cluster %s", spec.Name, err, req.Name, spec.Name)
+		}
+	}
+
 	fmt.Fprintf(out, "\nkubectl context: %s\n", p.Context(spec.Name))
 	fmt.Fprintf(out, "Try: kubectl --context %s get nodes\n", p.Context(spec.Name))
 	fmt.Fprintf(out, "Kubeconfig: k8slocalcli kubeconfig %s --output %s.kubeconfig\n", spec.Name, spec.Name)
+	fmt.Fprintf(out, "URLs and credentials, any time: k8slocalcli info %s\n", spec.Name)
 	return nil
 }
 
