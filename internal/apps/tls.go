@@ -97,24 +97,12 @@ func issueVerifiedCert(ctx context.Context, env *Env, method cluster.InstallMeth
 }
 
 func installCertManager(ctx context.Context, env *Env, method cluster.InstallMethod) error {
-	switch method {
-	case cluster.MethodHelm:
-		return env.helmInstall(ctx, helmChart{
-			Release:   "cert-manager",
-			Chart:     certManagerChart,
-			Version:   certManagerVersion,
-			Namespace: certManagerNamespace,
-			Set:       []string{"crds.enabled=true"},
-		})
-	case cluster.MethodManifest:
-		url := fmt.Sprintf("https://github.com/cert-manager/cert-manager/releases/download/%s/cert-manager.yaml", certManagerVersion)
-		if err := env.applyURL(ctx, url); err != nil {
-			return err
-		}
-		return env.waitAvailable(ctx, certManagerNamespace, 5*time.Minute)
-	default:
-		return fmt.Errorf("unsupported method %q", method)
+	if err := installApp(ctx, env, certManagerApp, method, ""); err != nil {
+		return err
 	}
+	// The verified-TLS flow applies cert-manager resources right after this,
+	// so wait for its workloads here (Install does this in its verify step).
+	return verifyWorkloads(ctx, env, certManagerApp)
 }
 
 func caIssuerYAML() string {

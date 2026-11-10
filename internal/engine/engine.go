@@ -94,3 +94,25 @@ func ParsePortOutput(out string) int {
 	}
 	return 0
 }
+
+// ContainerSubnets returns the subnets of every network the container is
+// attached to.
+func (e Engine) ContainerSubnets(ctx context.Context, container string) ([]string, error) {
+	r := runner.New(nil)
+	nets, err := r.Capture(ctx, e.Binary, "inspect", container,
+		"--format", "{{range $name, $_ := .NetworkSettings.Networks}}{{$name}} {{end}}")
+	if err != nil {
+		return nil, err
+	}
+	names := strings.Fields(nets)
+	if len(names) == 0 {
+		return nil, nil
+	}
+	args := append([]string{"network", "inspect"}, names...)
+	args = append(args, "--format", "{{range .IPAM.Config}}{{.Subnet}} {{end}}")
+	out, err := r.Capture(ctx, e.Binary, args...)
+	if err != nil {
+		return nil, err
+	}
+	return strings.Fields(out), nil
+}

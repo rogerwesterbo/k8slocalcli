@@ -53,19 +53,61 @@ Understanding these four seams is enough to be productive:
   is always a hardcoded tool; args are pre-validated). Add provider commands by
   calling `runner.New(out).Run/Capture`, not `os/exec` directly.
 
-- **`internal/tui` (`form.go`)** — the `termui/v3` form. termui has no text-input
-  widget, so input is hand-rolled: a single event loop dispatches keys to a
-  focused field index. It returns a `cluster.Spec` and never creates clusters
-  itself.
+- **`internal/tui`** — `termui/v3` forms: `form.go` (create, custom
+  two-column layout), `appinstall.go` and `appuninstall.go` (both a
+  `simpleForm`: a slice of `formField`s with `text`/`adjust`/`enter` closures,
+  plus `submit`/`summary`). termui has no text-input widget, so input is
+  hand-rolled. Shared pieces: `frame.go` (`runLoop`, `formFrame`
+  buttons/help/status, `styleField`), `checklist.go` (the scrolling tick list
+  with per-row options/locks/hints, and the `overlay` that shows it over a
+  form), `appselection.go` (preset browse/apply + catalog choices, shared by
+  create and install). A new form = a `simpleForm` with fields; long lists =
+  a `checklist`. `handleKey` is pure and unit-tested without a terminal; forms
+  return data and never create, install or remove anything (validation that
+  needs the cluster is passed in as a callback, e.g. uninstall's `Check`).
+  To drive a form in a pty (e2e), set `TERM=xterm-256color`, wait for the
+  alternate screen (`ESC[?1049h`) before typing, and send arrows as `ESC O B`
+  (termbox enables keypad mode; `ESC [ B` arrives as Esc, "[", "B").
 
 - **`internal/apps`** — everything installed *after* `Provider.Create`, via
   kubectl/helm only (never imports `provider`; callers pass an `apps.Target`).
-  `SetupExposure` installs Gateway API CRDs → controller → TLS secret →
-  shared Gateway; `Install` installs a catalog `App` and adds its route.
-  Adding an app = an `App` value in `catalog` (methods, namespace, `Expose`,
-  install func). Adding a gateway controller = implement `GatewayController`
-  (contract in `gateway.go`), add it to `controllers` and
+  Two halves: the exposure stack (`gateway.go`, `envoy.go`, `tls.go`:
+  Gateway API CRDs → controller → TLS secret → shared Gateway) and the app
+  catalog. File map for the catalog — put new code where its kind lives:
+
+  | File | Holds |
+  |---|---|
+  | `catalog.go` | `App` (fields in execution order, rules in its doc comment), `catalog`, `Plan`, presets |
+  | `lifecycle.go` | install: `InstallAll`/`Install` → connect → precheck → prepare+install → verify → configure+postcheck → route/notes, each phase with its own timeout (`withTimeout`) |
+  | `uninstall.go` | `PlanUninstall`, `DetectInstallation` (typed `InstallState`), `Dependants`, `Uninstall` |
+  | `helm.go` / `gitops.go` | the three chart methods: `helmInstall`, `fluxInstall`, `argoInstall`; `renderChart` merges app values + `--values` |
+  | `kube.go` | cluster building blocks: `kubectl*`, `apply*`, `exists`, Secrets, namespaces, `defaultStorageClass`, `isTalos`, `retry`, `remaining` |
+  | `checks.go` | reusable preflights (`requireDefaultStorageClass`) and functional checks (`storageSmokeTest`) |
+  | `notes.go` | `printAccess` = URL + app notes, used by install, skip and `info` |
+  | `cabundle.go` | corporate CA bundle for pods that fetch over HTTPS |
+  | `values.go` | `ParseSelection`, `ParseValuesFlags`, `mergeValues` |
+  | `networking.go` … `demo.go` | one file per `Category` with that category's `App` vars (`xxxApp`) |
+
+  Adding an app: an `xxxApp` var with a static `chart` (+ `values` func)
+  and/or `manifestURL` (+ `afterManifest`), `Detect`, and only the hooks it
+  needs; add it to `catalog`. Reuse before writing: a Secret →
+  `ensurePasswordSecret`, a volume check → `storageSmokeTest`, a webhook
+  that needs time → `applyYAMLRetry`/`retry`, a database → `ensurePostgres`,
+  host access → `Privileged: true`. Pin versions after checking them
+  (`helm show chart`); k8sdockside/nyancat are deliberately unpinned. Notes
+  read live state, never `env.Profile` (`info` does not know the profile).
+  User `--values` are deep-merged over app values, so values stay plain maps.
+  Uninstall finds the method live; manifest installs are only recognised by the
+  `k8slocalcli.io/installed-by=manifest` label. Never delete CRDs or protected
+  namespaces. Verify new apps on **both** kind and Talos (see the Talos Pod
+  Security gotcha below). Adding a gateway controller = implement
+  `GatewayController` (contract in `gateway.go`), add it to `controllers` and
   `cluster.GatewayControllers`.
+
+- **`internal/cli` target selection** — app commands embed `targetFlags`
+  (`target.go`: `--cluster`/`--provider`/`--context` → `resolve` builds the
+  `Env` and checks the connection); `newEnv` + `localTarget` are the only way
+  an `apps.Env` is built.
 
 - **`internal/progress`** — `Reporter.Step` runs a long step: on a terminal a
   single redrawn line (spinner · elapsed · status) with command output held
@@ -81,14 +123,16 @@ Understanding these four seams is enough to be productive:
 
 - **`internal/cli` (`root.go`, `kubeconfig.go`, `app.go`)** — cobra tree
   (`create`/`list`/`delete`/`kubeconfig`/`info`/`app`). `info` is read-only and
-  stores nothing: apps are found by `App.Deployment`, hosts from their route,
+  stores nothing: apps are found by `App.Detect`, hosts from their route,
   credentials via `App.notes` — keep it that way rather than caching secrets
   under `~/.k8slocalcli` (that dir's `clusters/` is talosctl state, talos-only). `create` launches the TUI **only when
   `--name` is empty**; otherwise it runs non-interactively from flags. `delete`
   and `kubeconfig` auto-detect the owning provider by asking each
   `Provider.Exists` (or show a picker with no name). `kubeconfig` prints
   `Provider.Kubeconfig` to stdout, writes it with `--output`, or calls
-  `Provider.MergeKubeconfig` with `--merge`. `list`/`delete` degrade gracefully when Docker
+  `Provider.MergeKubeconfig` with `--merge`. `app install --context` targets
+  any kube context (`Target.Provider == ""`, i.e. `External()`): no routes,
+  secure metrics-server defaults, no kind/Talos workarounds. `list`/`delete` degrade gracefully when Docker
   is down.
 
 ## Provider-specific gotchas
@@ -188,6 +232,13 @@ Understanding these four seams is enough to be productive:
   `10.5.0.0/24`, and Docker rejects overlapping pools. `freeTalosSubnet` scans
   allocated Docker subnets and `Talos.Create` passes `--subnet` when the default
   is taken. `pickTalosSubnet` holds the pure logic and is the tested seam.
+- **Talos Pod Security / read-only root (apps)**: Talos enforces Pod Security
+  `baseline` everywhere but kube-system, and kind does not — so an app passing
+  on kind can still fail on Talos. Apps needing hostPath, host network or extra
+  capabilities set `privileged: true` (namespace labelled
+  `pod-security.kubernetes.io/enforce=privileged` before install). `/opt` is
+  read-only on Talos, so local-path uses `/var/local-path-provisioner` there
+  (`isTalos` checks the nodes' osImage, so `--context` Talos clusters too).
 - **Zero workers**: `makeControlPlaneSchedulable` (`schedule.go`) removes the
   control-plane `NoSchedule` taint so a control-plane-only cluster can run pods.
 - **Version selection**: an empty `Spec.K8sVersion` means "provider's newest" —
@@ -214,7 +265,10 @@ Understanding these four seams is enough to be productive:
   24h, waits at most 1.5s after the command, and is off with
   `K8SLOCALCLI_NO_UPDATE_CHECK`.
 - README is need-to-know (install, usage, testing); internals go in
-  `docs/how-it-works.md`, maintainer gotchas here.
+  `docs/how-it-works.md`, maintainer gotchas here. Per-app user docs live in
+  `docs/apps.md` (what each app gives, logins, what dev/production change):
+  adding or changing a catalog app means updating its entry there, the app list
+  in the README's Apps section, and the presets table if presets changed.
 
 ## Testing notes
 

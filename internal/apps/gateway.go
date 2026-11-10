@@ -88,7 +88,7 @@ func SetupExposure(ctx context.Context, env *Env, exp cluster.Exposure) error {
 		return err
 	}
 	if !supports(ctrl.Methods(), exp.ControllerMethod) {
-		return fmt.Errorf("%s cannot be installed via %s (supported: %s)", ctrl.Description(), exp.ControllerMethod, methodsText(ctrl.Methods()))
+		return fmt.Errorf("%s cannot be installed via %s (supported: %s)", ctrl.Description(), exp.ControllerMethod, MethodsText(ctrl.Methods()))
 	}
 
 	fmt.Fprintf(env.Out, "\n🌐 Setting up host exposure (%s and %s)\n",

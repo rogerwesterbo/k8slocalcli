@@ -10,7 +10,6 @@ import (
 	ui "github.com/gizak/termui/v3"
 	"github.com/gizak/termui/v3/widgets"
 
-	"github.com/rogerwesterbo/k8slocalcli/internal/apps"
 	"github.com/rogerwesterbo/k8slocalcli/internal/cluster"
 )
 
@@ -29,8 +28,9 @@ const (
 	fieldChannel
 	fieldGatewayMethod
 	fieldCertManagerMethod
-	fieldApp     // one per catalog app: off / install method
-	fieldAppHost // one per exposable catalog app: hostname
+	fieldProfile // dev / production
+	fieldPreset  // browse presets; Enter applies one (or "none" to clear)
+	fieldApps    // opens the app picker
 )
 
 const (
@@ -63,7 +63,6 @@ type Result struct {
 // field is one input on the form.
 type field struct {
 	id    fieldID
-	app   int  // catalog index for fieldApp/fieldAppHost
 	half  bool // shares a row with the next half-width field
 	title string
 	w     *widgets.Paragraph
@@ -81,52 +80,29 @@ type form struct {
 	versions   map[cluster.Provider][]string
 	versionIdx int
 
-	catalog []apps.App
-	// appChoice[i] is 0 for "off", or 1+index into catalog[i].Methods.
-	appChoice []int
-	appHost   []string
+	// appSelection holds the preset and app choices, shared with the
+	// app-install form; overlay shows their checklist.
+	appSelection
+	overlay
 
 	fields     []*field
 	title      *widgets.Paragraph
 	showBanner bool
-	createBtn  *widgets.Paragraph
-	cancelBtn  *widgets.Paragraph
-	help       *widgets.Paragraph
-	status     *widgets.Paragraph
+	formFrame
 }
 
 // Run launches the interactive form, pre-filled from initial, and returns the
 // collected Spec. versions provides the selectable Kubernetes versions per
 // provider (newest first). It blocks until the user confirms or cancels.
 func Run(initial cluster.Spec, versions map[cluster.Provider][]string) (Result, error) {
-	if err := ui.Init(); err != nil {
-		return Result{}, fmt.Errorf("could not start the terminal UI (are you on an interactive terminal?): %w", err)
-	}
-	defer ui.Close()
-
 	f := newForm(initial, versions)
-	f.layout()
-	f.render()
-
-	for e := range ui.PollEvents() {
-		switch e.Type {
-		case ui.ResizeEvent:
-			ui.Clear()
-			f.layout()
-			f.render()
-			continue
-		case ui.KeyboardEvent:
-			done, res, err := f.handleKey(e.ID)
-			if err != nil {
-				return Result{}, err
-			}
-			if done {
-				return res, nil
-			}
-			f.render()
-		}
-	}
-	return Result{}, nil
+	var res Result
+	err := runLoop(f.layout, f.render, func(id string) (bool, error) {
+		done, r, err := f.handleKey(id)
+		res = r
+		return done, err
+	})
+	return res, err
 }
 
 func newForm(initial cluster.Spec, versions map[cluster.Provider][]string) *form {
@@ -147,7 +123,8 @@ func newForm(initial cluster.Spec, versions map[cluster.Provider][]string) *form
 	}
 	initial.Exposure = withExposureDefaults(initial.Exposure)
 
-	f := &form{spec: initial, versions: versions, catalog: apps.Catalog()}
+	f := &form{spec: initial, versions: versions, appSelection: newAppSelection(initial.Apps, nil)}
+	f.onClose = func() { f.preset = f.matchingPreset() }
 
 	// Resolve the initial version selection: honour a pre-set version, else
 	// default to the latest (index 0).
@@ -160,29 +137,6 @@ func newForm(initial cluster.Spec, versions map[cluster.Provider][]string) *form
 		}
 	}
 	f.syncVersion()
-
-	// App selections, pre-filled from any --app flags.
-	f.appChoice = make([]int, len(f.catalog))
-	f.appHost = make([]string, len(f.catalog))
-	for i, a := range f.catalog {
-		if a.Expose != nil {
-			f.appHost[i] = a.Expose.DefaultHost
-		}
-		for _, req := range initial.Apps {
-			if req.Name != a.Name {
-				continue
-			}
-			f.appChoice[i] = 1
-			for j, m := range a.Methods {
-				if m == req.Method {
-					f.appChoice[i] = j + 1
-				}
-			}
-			if req.Host != "" {
-				f.appHost[i] = req.Host
-			}
-		}
-	}
 
 	add := func(id fieldID, title string, half bool) {
 		f.fields = append(f.fields, &field{id: id, title: title, half: half})
@@ -198,11 +152,11 @@ func newForm(initial cluster.Spec, versions map[cluster.Provider][]string) *form
 	add(fieldChannel, " Gateway API channel ", true)
 	add(fieldGatewayMethod, " Envoy Gateway via ", true)
 	add(fieldCertManagerMethod, " cert-manager via ", false)
-	for i, a := range f.catalog {
-		f.fields = append(f.fields, &field{id: fieldApp, app: i, half: a.Expose != nil, title: " " + a.Description + " "})
-		if a.Expose != nil {
-			f.fields = append(f.fields, &field{id: fieldAppHost, app: i, half: true, title: " " + a.Name + " hostname "})
-		}
+	add(fieldProfile, " App profile — dev: testing · production: replicas, persistence ", false)
+	add(fieldPreset, " Preset — ←/→ browse, Enter use ", false)
+	add(fieldApps, " Apps ", false)
+	if !f.spec.Profile.Valid() {
+		f.spec.Profile = cluster.ProfileDev
 	}
 	for _, fl := range f.fields {
 		fl.w = widgets.NewParagraph()
@@ -215,18 +169,7 @@ func newForm(initial cluster.Spec, versions map[cluster.Provider][]string) *form
 	f.title.Text = strings.Join(banner, "\n")
 	f.title.TextStyle = ui.NewStyle(ui.ColorCyan)
 
-	f.createBtn = widgets.NewParagraph()
-	f.createBtn.WrapText = false
-	f.cancelBtn = widgets.NewParagraph()
-	f.cancelBtn.WrapText = false
-
-	f.help = widgets.NewParagraph()
-	f.help.Title = " Keys "
-	f.help.Text = "↑/↓/Tab: move · ←/→: change · type: edit · Enter: next (Create to build) · Esc: cancel"
-	f.help.TextStyle = ui.NewStyle(ui.ColorWhite)
-
-	f.status = widgets.NewParagraph()
-	f.status.Border = false
+	f.formFrame = newFormFrame("Create", "↑/↓/Tab: move · ←/→: change · type: edit · Enter: next (Create to build) · Esc: cancel")
 
 	return f
 }
@@ -278,8 +221,6 @@ func (f *form) enabled(fl *field) bool {
 		return exp.Enabled
 	case fieldCertManagerMethod:
 		return exp.Enabled && exp.TLS == cluster.TLSVerified
-	case fieldAppHost:
-		return exp.Enabled && f.appChoice[fl.app] > 0
 	default:
 		return true
 	}
@@ -288,13 +229,7 @@ func (f *form) enabled(fl *field) bool {
 // layout positions every widget for the current terminal size.
 func (f *form) layout() {
 	termW, termH := ui.TerminalDimensions()
-	w := formWidth
-	if termW > 0 && termW-2 < w {
-		w = termW - 2
-	}
-	x0 := formMargin
-	x1 := x0 + w
-	mid := x0 + w/2
+	x0, x1, mid := formBounds(termW)
 
 	rows := 0
 	for i := 0; i < len(f.fields); i++ {
@@ -304,7 +239,7 @@ func (f *form) layout() {
 		rows++
 	}
 	bannerH := len(banner) + 1
-	needed := formMargin + rows*fieldH + 3 + 3 + statusH
+	needed := formMargin + rows*fieldH + frameHeight
 	f.showBanner = termH == 0 || termH >= needed+bannerH
 
 	y := formMargin
@@ -325,56 +260,33 @@ func (f *form) layout() {
 		y += fieldH
 	}
 
-	// Button row: Create on the left, Cancel on the right.
-	f.createBtn.SetRect(x0, y, mid, y+3)
-	f.cancelBtn.SetRect(mid, y, x1, y+3)
-	y += 3
-
-	f.help.SetRect(x0, y, x1, y+3)
-	y += 3
-	f.status.SetRect(x0, y, x1, y+statusH)
+	f.formFrame.layout(x0, x1, mid, y)
 }
 
 // render refreshes every widget's content and draws the screen.
 func (f *form) render() {
+	if f.renderOverlay() {
+		return
+	}
 	for i, fl := range f.fields {
 		fl.w.Text = f.fieldText(fl, i == f.focus)
-		switch {
-		case i == f.focus:
-			fl.w.BorderStyle = ui.NewStyle(ui.ColorYellow)
-			fl.w.TitleStyle = ui.NewStyle(ui.ColorYellow, ui.ColorClear, ui.ModifierBold)
-		case !f.enabled(fl):
-			fl.w.BorderStyle = ui.NewStyle(ui.ColorBlack)
-			fl.w.TitleStyle = ui.NewStyle(ui.ColorWhite)
-		default:
-			fl.w.BorderStyle = ui.NewStyle(ui.ColorWhite)
-			fl.w.TitleStyle = ui.NewStyle(ui.ColorWhite)
-		}
+		styleField(fl.w, i == f.focus, f.enabled(fl))
 	}
-
-	f.createBtn.Text = fillButton("Create", f.createBtn)
-	f.cancelBtn.Text = fillButton("Cancel", f.cancelBtn)
-	styleButton(f.createBtn, f.focus == f.createIdx(), ui.ColorGreen)
-	styleButton(f.cancelBtn, f.focus == f.cancelIdx(), ui.ColorRed)
+	f.renderButtons(f.focus == f.createIdx(), f.focus == f.cancelIdx())
 
 	spec := f.buildSpec()
 	switch warnings := spec.Warnings(); {
-	case f.err != "":
-		f.status.Text = "🛑 " + f.err
-		f.status.TextStyle = ui.NewStyle(ui.ColorRed)
 	case len(warnings) > 0 && !spec.Exposure.Enabled:
-		f.status.Text = "⚠️  " + warnings[0]
-		f.status.TextStyle = ui.NewStyle(ui.ColorYellow)
+		f.setStatus(f.err, "⚠️  "+warnings[0], ui.ColorYellow)
 	default:
 		text := summary(spec)
 		if len(warnings) > 0 {
 			text += "\n⚠️  " + warnings[0]
 		}
-		f.status.Text = text
-		f.status.TextStyle = ui.NewStyle(ui.ColorGreen)
+		f.setStatus(f.err, text, ui.ColorGreen)
 	}
 
-	items := []ui.Drawable{f.createBtn, f.cancelBtn, f.help, f.status}
+	items := f.items()
 	if f.showBanner {
 		items = append(items, f.title)
 	}
@@ -391,10 +303,8 @@ func (f *form) fieldText(fl *field, focused bool) string {
 		switch {
 		case !exp.Enabled:
 			return dim("(needs host exposure)")
-		case fl.id == fieldCertManagerMethod:
-			return dim("(only for verified certificates)")
 		default:
-			return dim("(app not selected)")
+			return dim("(only for verified certificates)")
 		}
 	}
 	switch fl.id {
@@ -424,44 +334,23 @@ func (f *form) fieldText(fl *field, focused bool) string {
 	case fieldChannel:
 		return options(cluster.GatewayChannels, exp.Channel)
 	case fieldGatewayMethod:
-		return options(cluster.InstallMethods, exp.ControllerMethod)
+		return options(cluster.DirectMethods, exp.ControllerMethod)
 	case fieldCertManagerMethod:
-		return options(cluster.InstallMethods, exp.CertManagerMethod)
-	case fieldApp:
-		return options(f.appOptions(fl.app), f.appOptions(fl.app)[f.appChoice[fl.app]])
-	case fieldAppHost:
-		host := f.appHost[fl.app]
-		if focused {
-			return host + "▏"
-		}
-		return host
+		return options(cluster.DirectMethods, exp.CertManagerMethod)
+	case fieldProfile:
+		return options(cluster.Profiles, f.spec.Profile)
+	case fieldPreset:
+		return f.presetText(focused)
+	case fieldApps:
+		return f.appsText(focused)
 	}
 	return ""
-}
-
-// appOptions is "off" followed by the app's install methods.
-func (f *form) appOptions(i int) []string {
-	out := []string{"off"}
-	for _, m := range f.catalog[i].Methods {
-		out = append(out, string(m))
-	}
-	return out
 }
 
 // buildSpec returns the spec with the app selections applied.
 func (f *form) buildSpec() cluster.Spec {
 	s := f.spec
-	s.Apps = nil
-	for i, a := range f.catalog {
-		if f.appChoice[i] == 0 {
-			continue
-		}
-		req := cluster.AppRequest{Name: a.Name, Method: a.Methods[f.appChoice[i]-1]}
-		if a.Expose != nil && s.Exposure.Enabled {
-			req.Host = f.appHost[i]
-		}
-		s.Apps = append(s.Apps, req)
-	}
+	s.Apps = f.requests(s.Exposure.Enabled)
 	return s
 }
 
@@ -469,6 +358,11 @@ func (f *form) buildSpec() cluster.Spec {
 // loop should stop.
 func (f *form) handleKey(id string) (done bool, res Result, err error) {
 	f.err = ""
+
+	if f.open != nil {
+		f.overlayKey(id)
+		return false, Result{}, nil
+	}
 
 	switch id {
 	case "<C-c>", "<Escape>":
@@ -494,7 +388,13 @@ func (f *form) handleKey(id string) (done bool, res Result, err error) {
 
 	case "<Space>":
 		if fl := f.focused(); fl != nil {
-			if fl.id != fieldName && fl.id != fieldAppHost {
+			switch fl.id {
+			case fieldName:
+			case fieldApps:
+				f.openApps()
+			case fieldPreset:
+				f.applyPreset()
+			default:
 				f.adjust(+1)
 			}
 		} else {
@@ -533,6 +433,15 @@ func (f *form) activate() (bool, Result, error) {
 	case f.cancelIdx():
 		return true, Result{Confirmed: false}, nil
 	default:
+		if fl := f.focused(); fl != nil && fl.id == fieldApps {
+			f.openApps()
+			return false, Result{}, nil
+		}
+		// Enter on a preset that is not in use applies it; otherwise it
+		// moves on like any field.
+		if fl := f.focused(); fl != nil && fl.id == fieldPreset && f.applyPreset() {
+			return false, Result{}, nil
+		}
 		f.move(+1)
 		return false, Result{}, nil
 	}
@@ -582,12 +491,15 @@ func (f *form) adjust(delta int) {
 	case fieldChannel:
 		exp.Channel = cycle(cluster.GatewayChannels, exp.Channel, delta)
 	case fieldGatewayMethod:
-		exp.ControllerMethod = cycle(cluster.InstallMethods, exp.ControllerMethod, delta)
+		exp.ControllerMethod = cycle(cluster.DirectMethods, exp.ControllerMethod, delta)
 	case fieldCertManagerMethod:
-		exp.CertManagerMethod = cycle(cluster.InstallMethods, exp.CertManagerMethod, delta)
-	case fieldApp:
-		n := len(f.catalog[fl.app].Methods) + 1
-		f.appChoice[fl.app] = ((f.appChoice[fl.app]+delta)%n + n) % n
+		exp.CertManagerMethod = cycle(cluster.DirectMethods, exp.CertManagerMethod, delta)
+	case fieldProfile:
+		f.spec.Profile = cycle(cluster.Profiles, f.spec.Profile, delta)
+	case fieldPreset:
+		f.browsePreset(delta)
+	case fieldApps:
+		f.openApps()
 	}
 }
 
@@ -601,10 +513,6 @@ func (f *form) backspace() {
 	case fieldName:
 		if n := len(f.spec.Name); n > 0 {
 			f.spec.Name = f.spec.Name[:n-1]
-		}
-	case fieldAppHost:
-		if n := len(f.appHost[fl.app]); n > 0 {
-			f.appHost[fl.app] = f.appHost[fl.app][:n-1]
 		}
 	case fieldControlPlanes:
 		f.spec.ControlPlanes = clamp(f.spec.ControlPlanes/10, 1, maxControlPlanes)
@@ -632,10 +540,6 @@ func (f *form) typeRune(id string) {
 	case fieldName:
 		if isNameRune && len(f.spec.Name) < 63 {
 			f.spec.Name += string(r)
-		}
-	case fieldAppHost:
-		if (isNameRune || r == '.') && len(f.appHost[fl.app]) < 253 {
-			f.appHost[fl.app] += string(r)
 		}
 	case fieldControlPlanes:
 		// Maxima are single digits, so a typed digit replaces the value
@@ -743,8 +647,11 @@ func summary(s cluster.Spec) string {
 	if s.Exposure.Enabled {
 		text += fmt.Sprintf(" · %s gateway (%s, %s TLS)", s.Exposure.Controller, s.Exposure.Channel, s.Exposure.TLS)
 	}
-	for _, a := range s.Apps {
-		text += " · " + a.Name
+	if len(s.Apps) > 0 {
+		text += fmt.Sprintf(" · %s apps:", s.Profile)
+		for _, a := range s.Apps {
+			text += " " + a.Name
+		}
 	}
 	return text
 }
@@ -786,4 +693,9 @@ func clamp(v, lo, hi int) int {
 // dim wraps text in termui's dim style markup.
 func dim(s string) string {
 	return fmt.Sprintf("[%s](fg:white)", s)
+}
+
+// openApps shows the app checklist.
+func (f *form) openApps() {
+	f.show(f.checklist(func() string { return fmt.Sprintf("Apps — %s profile", f.spec.Profile) }))
 }

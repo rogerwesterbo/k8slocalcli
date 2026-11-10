@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/rogerwesterbo/k8slocalcli/internal/cluster"
 )
@@ -41,9 +43,7 @@ func ShowInfo(ctx context.Context, env *Env) {
 		if env.Exposed {
 			host = routedHost(ctx, env, app)
 		}
-		if app.notes != nil {
-			app.notes(ctx, env, host)
-		}
+		printAccess(ctx, env, app, host)
 		if host != "" {
 			checkHostResolves(ctx, env, host)
 		}
@@ -53,24 +53,12 @@ func ShowInfo(ctx context.Context, env *Env) {
 	}
 }
 
-func appInstalled(ctx context.Context, env *Env, app App) bool {
-	if app.Deployment == "" {
-		return false
-	}
-	_, err := env.kubectlQuiet(ctx, "get", "deployment", app.Deployment, "-n", app.Namespace, "-o", "name")
-	return err == nil
-}
-
 // routedHost returns the hostname the app's route serves, or "".
 func routedHost(ctx context.Context, env *Env, app App) string {
 	if app.Expose == nil {
 		return ""
 	}
-	kind := "httproute"
-	if app.Expose.Protocol == ProtocolGRPC {
-		kind = "grpcroute"
-	}
-	host, err := env.kubectlQuiet(ctx, "get", kind, app.Name, "-n", app.Namespace,
+	host, err := env.kubectlQuiet(ctx, "get", app.Expose.routeKind(), app.Name, "-n", app.Namespace,
 		"-o", "jsonpath={.spec.hostnames[0]}")
 	if err != nil {
 		return ""
@@ -101,4 +89,61 @@ func tlsText(ctx context.Context, env *Env) string {
 		return "verified HTTPS"
 	}
 	return "self-signed HTTPS (browsers warn)"
+}
+
+// InstalledApps reports which catalog apps are present in the cluster (by
+// their Detect resources).
+func InstalledApps(ctx context.Context, env *Env) map[string]bool {
+	out := map[string]bool{}
+	for _, a := range scanCatalog(ctx, func(ctx context.Context, a App) bool { return appInstalled(ctx, env, a) }) {
+		out[a.Name] = true
+	}
+	return out
+}
+
+// Inventory returns every catalog app present in the cluster with how it was
+// installed (InstalledByOthers included, so callers can show why it cannot be
+// removed), in catalog order.
+func Inventory(ctx context.Context, env *Env) []Removal {
+	installs := map[string]Installation{}
+	var mu sync.Mutex
+	found := scanCatalog(ctx, func(ctx context.Context, a App) bool {
+		inst := DetectInstallation(ctx, env, a)
+		if inst.State == NotInstalled {
+			return false
+		}
+		mu.Lock()
+		installs[a.Name] = inst
+		mu.Unlock()
+		return true
+	})
+	out := make([]Removal, len(found))
+	for i, a := range found {
+		out[i] = Removal{App: a, Installation: installs[a.Name]}
+	}
+	return out
+}
+
+// scanCatalog runs match for every catalog app concurrently (each one is a
+// few kubectl calls) and returns the matching apps in catalog order.
+func scanCatalog(ctx context.Context, match func(ctx context.Context, a App) bool) []App {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	hit := make([]bool, len(catalog))
+	var wg sync.WaitGroup
+	for i, a := range catalog {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			hit[i] = match(ctx, a)
+		}()
+	}
+	wg.Wait()
+	var out []App
+	for i, a := range catalog {
+		if hit[i] {
+			out = append(out, a)
+		}
+	}
+	return out
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -71,6 +72,7 @@ func newRootCmd() *cobra.Command {
 func newCreateCmd() *cobra.Command {
 	spec := cluster.DefaultSpec()
 	var assumeYes bool
+	var values map[string]map[string]any
 
 	cmd := &cobra.Command{
 		Use:   "create",
@@ -96,7 +98,7 @@ func newCreateCmd() *cobra.Command {
 				}
 				spec = res.Spec
 			}
-			return runCreate(cmd.Context(), spec, newPrompter(cmd.OutOrStdout(), assumeYes), cmd.OutOrStdout())
+			return runCreate(cmd.Context(), spec, values, newPrompter(cmd.OutOrStdout(), assumeYes), cmd.OutOrStdout())
 		},
 	}
 
@@ -115,6 +117,9 @@ func newCreateCmd() *cobra.Command {
 	channelFlag := flags.String("gateway-channel", string(spec.Exposure.Channel), "Gateway API CRD channel: standard or experimental")
 	tlsFlag := flags.String("tls", string(spec.Exposure.TLS), "HTTPS certificates: self-signed, or verified (cert-manager + a local CA trusted by this machine)")
 	certManagerMethodFlag := flags.String("cert-manager-method", string(spec.Exposure.CertManagerMethod), "install cert-manager via helm or manifest (with --tls verified)")
+	valuesFlags := flags.StringArray("values", nil, "chart values for an app, merged over k8slocalcli's: <app>=<file.yaml>; repeatable")
+	presetFlags := flags.StringArray("preset", nil, "install a preset bundle of apps, e.g. observability; repeatable (list: k8slocalcli app list)")
+	profileFlag := flags.String("profile", string(spec.Profile), "app sizing: dev (testing) or production (near-production: replicas, persistence)")
 	appFlags := flags.StringArray("app", nil, "install an app: name[:method][=hostname], e.g. argocd, argocd:manifest=cd.localtest.me; repeatable (list: k8slocalcli app list)")
 	flags.StringArrayVar(&spec.CACerts, "ca-cert", nil, "extra CA certificate (PEM file) for the nodes to trust, e.g. a corporate proxy root CA; repeatable. Files in ~/.k8slocalcli/ca-certificates are always added")
 	flags.BoolVarP(&assumeYes, "yes", "y", false, "answer yes to prompts (replace an existing cluster or remove leftovers of the same name)")
@@ -127,21 +132,16 @@ func newCreateCmd() *cobra.Command {
 		spec.Exposure.Channel = cluster.GatewayChannel(*channelFlag)
 		spec.Exposure.TLS = cluster.TLSMode(*tlsFlag)
 		spec.Exposure.CertManagerMethod = cluster.InstallMethod(*certManagerMethodFlag)
-		spec.Apps = nil
-		for _, a := range *appFlags {
-			req, err := apps.ParseRequest(a)
-			if err != nil {
-				return fmt.Errorf("--app %s: %w", a, err)
-			}
-			spec.Apps = append(spec.Apps, req)
-		}
-		return nil
+		spec.Profile = cluster.Profile(*profileFlag)
+		var err error
+		spec.Apps, values, err = apps.ParseSelection(*appFlags, *presetFlags, *valuesFlags)
+		return err
 	}
 
 	return cmd
 }
 
-func runCreate(ctx context.Context, spec cluster.Spec, ask *prompter, out io.Writer) error {
+func runCreate(ctx context.Context, spec cluster.Spec, values map[string]map[string]any, ask *prompter, out io.Writer) error {
 	if err := spec.Validate(); err != nil {
 		return err
 	}
@@ -181,26 +181,19 @@ func runCreate(ctx context.Context, spec cluster.Spec, ask *prompter, out io.Wri
 		return err
 	}
 
-	env := &apps.Env{
-		Target: apps.Target{
-			Name:        spec.Name,
-			KubeContext: p.Context(spec.Name),
-			Exposed:     spec.Exposure.Enabled,
-			GatewayNode: p.GatewayNode(spec.Name),
-			HTTPPort:    spec.HTTPPort,
-			HTTPSPort:   spec.HTTPSPort,
-		},
-		Out:      out,
-		Confirm:  ask.confirm,
-		Progress: newReporter(out),
-	}
+	env := newEnv(localTarget(ctx, p, spec.Name, spec.CACerts), out, ask)
+	env.Profile = spec.Profile
+	env.Values = values
 	if err := apps.SetupExposure(ctx, env, spec.Exposure); err != nil {
 		return fmt.Errorf("cluster %q is running, but setting up host exposure failed: %w", spec.Name, err)
 	}
-	for _, req := range spec.Apps {
-		if err := apps.Install(ctx, env, req); err != nil {
-			return fmt.Errorf("cluster %q is running, but %w\nretry with: k8slocalcli app install %s --cluster %s", spec.Name, err, req.Name, spec.Name)
+	if err := apps.InstallAll(ctx, env, spec.Apps); err != nil {
+		names := make([]string, len(spec.Apps))
+		for i, a := range spec.Apps {
+			names[i] = a.Name
 		}
+		return fmt.Errorf("cluster %q is running, but %w\nretry with: k8slocalcli app install %s --cluster %s --profile %s",
+			spec.Name, err, strings.Join(names, " "), spec.Name, spec.Profile.OrDefault())
 	}
 
 	fmt.Fprintf(out, "\nkubectl context: %s\n", p.Context(spec.Name))

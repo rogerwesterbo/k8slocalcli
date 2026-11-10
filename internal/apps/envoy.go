@@ -54,8 +54,8 @@ func (g envoyGateway) Install(ctx context.Context, env *Env, method cluster.Inst
 			Chart:     envoyChart,
 			Version:   envoyGatewayVersion,
 			Namespace: envoyNamespace,
-			Set:       []string{"crds.enabled=false"},
-		}); err != nil {
+			Values:    map[string]any{"crds": map[string]any{"enabled": false}},
+		}, defaultInstallTimeout); err != nil {
 			return err
 		}
 	case cluster.MethodManifest:

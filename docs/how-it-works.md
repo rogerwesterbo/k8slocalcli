@@ -101,3 +101,49 @@ are trusted by every node: on Talos through a `TrustedRootsConfig` machine-confi
 patch (without it etcd's image pull fails and bootstrap hangs in `Preparing`),
 on kind by installing them into each node's system store right after creation
 and restarting containerd.
+
+Node-level trust does not reach containers. Flux's source-controller and Argo
+CD's repo-server pull charts themselves, so when those CAs exist they get them
+too: a `k8slocalcli-ca-bundle` ConfigMap mounted at `/etc/ssl/k8slocalcli`, plus
+`SSL_CERT_DIR=/etc/ssl/certs:/etc/ssl/k8slocalcli` (`trustCABundle`, re-applied
+on every install of flux/argocd).
+
+## App lifecycle
+
+(What each app is and how to use it: [apps.md](apps.md).)
+
+Every catalog app (`internal/apps`) runs through the same steps
+(`lifecycle.go`), each with its own timeout:
+
+| Step | Timeout | What |
+|------|---------|------|
+| connect | 20s | the kube context exists and `/readyz` (or `/version`) answers |
+| precheck | 1m | helm on PATH, Flux/Argo CD CRDs for the gitops methods, dependencies, app preflight (default StorageClass, Longhorn on container nodes), already installed? |
+| install | 10m (15m for Longhorn, Keycloak, kube-prometheus-stack) | app `prepare` (Secrets, databases), then helm `--wait` / manifest / Flux HelmRelease Ready / Argo CD Synced+Healthy |
+| verify | 5m | `rollout status` for every Deployment, StatefulSet and DaemonSet in the app namespace (or the app's `Workloads`) |
+| postcheck | 5m | app `configure` (MetalLB pool, postgres cluster), CRD Established, app `check`, route |
+
+An app describes only what is specific to it: a chart (which gives it the
+helm, flux and argo methods; values are a map so all three use the same
+description) and/or a manifest, plus the hooks above. `Plan` orders requests
+and adds dependencies (`Requires`, and flux/argocd for the gitops methods);
+added ones are skipped silently when already installed. An installed app that
+Helm does not manage (kind's own local-path-provisioner) is never re-applied
+with Helm. Unpinned charts (k8sdockside, nyancat) take the newest release; for
+flux/argo it is resolved once with `helm show chart` so every method installs
+the same version.
+
+### Uninstall
+
+Nothing is stored on disk; `app uninstall` reads how an app was installed
+from the cluster (`DetectInstallation`): an Argo CD Application or Flux
+HelmRelease named after the app → delete it (the controller removes what it
+deployed; Argo CD through its resources finalizer); a Helm release → `helm
+uninstall --wait`; a Deployment labelled `k8slocalcli.io/installed-by=manifest`
+(set by every manifest install) → delete the same upstream manifest minus its
+CRDs and Namespaces. Anything else present is reported as "not installed by
+k8slocalcli" and left alone. Steps: connect → precheck all apps (method,
+`Dependants`) before removing any → confirm → remove (5m) → wait until gone
+(2m) → with `--purge`, delete the namespaces (5m; data namespaces such as
+cnpg's `postgres` first, while the operator can still run finalizers).
+

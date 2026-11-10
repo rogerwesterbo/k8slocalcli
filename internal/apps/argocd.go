@@ -2,10 +2,8 @@ package apps
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/rogerwesterbo/k8slocalcli/internal/cluster"
 )
@@ -17,66 +15,77 @@ const (
 	argoCDNamespace    = "argocd"
 )
 
-var argoCD = App{
+var argoCDApp = App{
 	Name:        "argocd",
 	Description: "Argo CD " + argoCDVersion,
-	Methods:     []cluster.InstallMethod{cluster.MethodHelm, cluster.MethodManifest},
+	Category:    CategoryGitOps,
 	Namespace:   argoCDNamespace,
-	Deployment:  "argocd-server",
+	Detect:      []string{"deployment/argocd-server"},
+	CRD:         argoApplicationCRD,
+	// Argo CD cannot install itself through the argo method, and Flux
+	// managing Argo CD is not a setup worth offering.
+	Methods: []cluster.InstallMethod{cluster.MethodHelm, cluster.MethodManifest},
 	// The UI and the CLI (with --grpc-web) both work over the HTTP route.
 	Expose: &Expose{
 		DefaultHost: "argocd." + cluster.LocalDomain,
 		Service:     "argocd-server",
 		Port:        80,
 		Protocol:    ProtocolHTTP,
+		LocalPort:   8080,
 	},
-	install: installArgoCD,
-	notes:   argoCDNotes,
+	chart: &helmChart{
+		Release:   "argocd",
+		Chart:     "argo-cd",
+		Repo:      "https://argoproj.github.io/argo-helm",
+		Version:   argoCDChartVersion,
+		Namespace: argoCDNamespace,
+	},
+	values:            argoCDValues,
+	manifestURL:       argoCDManifestURL,
+	manifestNamespace: argoCDNamespace,
+	afterManifest:     argoCDAfterManifest,
+	// The repo server pulls charts for the argo method.
+	configure: func(ctx context.Context, env *Env) error {
+		return env.trustCABundle(ctx, argoCDNamespace, "argocd-repo-server")
+	},
+	notes: argoCDNotes,
 }
 
-// installArgoCD installs Argo CD with server.insecure=true: TLS terminates at
+// argoCDValues runs argocd-server with server.insecure=true: TLS terminates at
 // the gateway, and argocd-server would otherwise redirect plain HTTP to HTTPS
 // in a loop.
-func installArgoCD(ctx context.Context, env *Env, method cluster.InstallMethod) error {
-	switch method {
-	case cluster.MethodHelm:
-		return env.helmInstall(ctx, helmChart{
-			Release:   "argocd",
-			Chart:     "argo-cd",
-			Repo:      "https://argoproj.github.io/argo-helm",
-			Version:   argoCDChartVersion,
-			Namespace: argoCDNamespace,
-			Set:       []string{`configs.params.server\.insecure=true`},
-		})
-	case cluster.MethodManifest:
-		if err := env.applyYAML(ctx, namespaceYAML(argoCDNamespace)); err != nil {
-			return err
-		}
-		url := fmt.Sprintf("https://raw.githubusercontent.com/argoproj/argo-cd/%s/manifests/install.yaml", argoCDVersion)
-		if err := env.kubectl(ctx, "apply", "--server-side", "--force-conflicts", "-n", argoCDNamespace, "-f", url); err != nil {
-			return err
-		}
-		if err := env.kubectl(ctx, "patch", "configmap", "argocd-cmd-params-cm", "-n", argoCDNamespace,
-			"--type", "merge", "-p", `{"data":{"server.insecure":"true"}}`); err != nil {
-			return err
-		}
-		if err := env.kubectl(ctx, "rollout", "restart", "deployment/argocd-server", "-n", argoCDNamespace); err != nil {
-			return err
-		}
-		return env.waitAvailable(ctx, argoCDNamespace, 5*time.Minute)
-	default:
-		return fmt.Errorf("unsupported method %q", method)
+func argoCDValues(_ context.Context, env *Env, _ string) (map[string]any, error) {
+	values := map[string]any{
+		"configs": map[string]any{"params": map[string]any{"server.insecure": true}},
 	}
+	if env.production() {
+		// Stateless components scale out; the application controller is
+		// sharded rather than replicated, and redis-ha needs 3+ nodes with
+		// hard anti-affinity, so both stay single.
+		values["server"] = map[string]any{"replicas": 2}
+		values["repoServer"] = map[string]any{"replicas": 2}
+		values["applicationSet"] = map[string]any{"replicas": 2}
+	}
+	return values, nil
+}
+
+// argoCDManifestURL has no namespace in it; it is applied into argocd.
+const argoCDManifestURL = "https://raw.githubusercontent.com/argoproj/argo-cd/" + argoCDVersion + "/manifests/install.yaml"
+
+// argoCDAfterManifest turns on server.insecure for the manifest install (the
+// chart sets it through values): TLS terminates at the gateway, and
+// argocd-server would otherwise redirect plain HTTP to HTTPS in a loop.
+func argoCDAfterManifest(ctx context.Context, env *Env) error {
+	if err := env.kubectl(ctx, "patch", "configmap", "argocd-cmd-params-cm", "-n", argoCDNamespace,
+		"--type", "merge", "-p", `{"data":{"server.insecure":"true"}}`); err != nil {
+		return err
+	}
+	return env.kubectl(ctx, "rollout", "restart", "deployment/argocd-server", "-n", argoCDNamespace)
 }
 
 func argoCDNotes(ctx context.Context, env *Env, host string) {
-	if host != "" {
-		fmt.Fprintf(env.Out, "   UI:       %s  ·  %s\n", env.URL("http", host), env.URL("https", host))
-	} else {
-		fmt.Fprintf(env.Out, "   UI:       http://localhost:8080  (after: kubectl --context %s port-forward -n argocd svc/argocd-server 8080:80)\n", env.KubeContext)
-	}
 	fmt.Fprintf(env.Out, "   Username: admin\n")
-	if pw := argoCDPassword(ctx, env); pw != "" {
+	if pw := env.secretValue(ctx, argoCDNamespace, "argocd-initial-admin-secret", "password"); pw != "" {
 		fmt.Fprintf(env.Out, "   Password: %s\n", pw)
 	} else {
 		// Argo CD recommends deleting the initial secret once the password
@@ -87,17 +96,4 @@ func argoCDNotes(ctx context.Context, env *Env, host string) {
 		addr := strings.TrimPrefix(env.URL("http", host), "http://")
 		fmt.Fprintf(env.Out, "   CLI:      argocd login %s --grpc-web --plaintext --username admin\n", addr)
 	}
-}
-
-func argoCDPassword(ctx context.Context, env *Env) string {
-	out, err := env.kubectlQuiet(ctx, "-n", argoCDNamespace, "get", "secret", "argocd-initial-admin-secret",
-		"-o", "jsonpath={.data.password}")
-	if err != nil {
-		return ""
-	}
-	pw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(out))
-	if err != nil {
-		return ""
-	}
-	return string(pw)
 }

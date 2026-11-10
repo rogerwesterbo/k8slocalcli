@@ -99,3 +99,16 @@ func talosDiscoveryOffPatch(talosMajorMinor string) string {
 	}
 	return "cluster:\n  discovery:\n    enabled: false\n"
 }
+
+// CABundle returns the extra CA certificates (the explicit files plus
+// ~/.k8slocalcli/ca-certificates) as one PEM bundle, or "" when there are
+// none. The apps package hands it to in-cluster components that fetch over
+// HTTPS themselves (GitOps controllers), which node-level trust does not
+// reach. Errors yield "": a broken file was already reported at create time.
+func CABundle(explicit []string) string {
+	bundle, _, err := caBundle(explicit)
+	if err != nil {
+		return ""
+	}
+	return bundle
+}

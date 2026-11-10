@@ -103,6 +103,10 @@ type Spec struct {
 	// Apps are catalog applications to install once the cluster is up.
 	Apps []AppRequest
 
+	// Profile sizes the apps: throwaway testing (dev) or closer to how they
+	// would run for real (production). Empty means ProfileDev.
+	Profile Profile
+
 	// CACerts are extra PEM files with CA certificates the nodes should trust,
 	// e.g. the root CA of a TLS-intercepting corporate proxy. Certificates in
 	// ~/.k8slocalcli/ca-certificates are added automatically.
@@ -119,6 +123,7 @@ func DefaultSpec() Spec {
 		HTTPPort:      DefaultHTTPPort,
 		HTTPSPort:     DefaultHTTPSPort,
 		Exposure:      DefaultExposure(),
+		Profile:       ProfileDev,
 	}
 }
 
@@ -159,6 +164,9 @@ func (s Spec) Validate() error {
 	}
 	if err := s.Exposure.Validate(); err != nil {
 		return err
+	}
+	if s.Profile != "" && !s.Profile.Valid() {
+		return fmt.Errorf("unknown profile %q (supported: %s)", s.Profile, joinValues(Profiles))
 	}
 	return validateApps(s.Apps)
 }

@@ -62,8 +62,11 @@ k8slocalcli delete dev
 | `k8slocalcli create` | create a cluster (form; or flags with `--name`) |
 | `k8slocalcli list` | list clusters |
 | `k8slocalcli info [name]` | URLs, installed apps and their logins |
-| `k8slocalcli app list` | apps you can install |
-| `k8slocalcli app install argocd --cluster dev` | install an app into an existing cluster |
+| `k8slocalcli app list` | apps and presets you can install |
+| `k8slocalcli app install` | form: pick a cluster, profile, preset and apps |
+| `k8slocalcli app install argocd --cluster dev` | install apps into an existing cluster |
+| `k8slocalcli app uninstall` | form: pick a cluster and the installed apps to remove |
+| `k8slocalcli app uninstall argocd --cluster dev` | remove apps (`--purge` also deletes their data) |
 | `k8slocalcli kubeconfig dev --merge` | add the cluster to `~/.kube/config` and switch to it |
 | `k8slocalcli delete [name]` | delete a cluster |
 | `k8slocalcli upgrade` | update k8slocalcli itself |
@@ -83,6 +86,28 @@ k8slocalcli create --name dev --expose=false                    # nothing reacha
 
 `k8slocalcli create --help` lists all flags (Kubernetes version, ports, Gateway
 API channel, install methods, ...).
+
+## Apps
+
+Install a catalog of apps into a cluster — MetalLB, metrics-server,
+cert-manager, local-path, NFS, Longhorn, Flux, Argo CD, Crossplane,
+CloudNativePG, Valkey, OpenBao, Keycloak, Trivy Operator,
+kube-prometheus-stack, k8sdockside and nyancat — or a preset bundle of them:
+
+```sh
+k8slocalcli app install                                      # form: cluster, profile, preset, apps
+k8slocalcli app install keycloak valkey --cluster dev         # keycloak brings cnpg
+k8slocalcli app install nyancat:flux --cluster dev            # via Flux (brings flux)
+k8slocalcli create --name dev --preset observability --app nyancat
+k8slocalcli app uninstall                                    # form: pick what to remove
+```
+
+Each app can be installed with `helm`, `manifest`, `flux` or `argo`, sized for
+`dev` (testing) or `production` (replicas, persistence), tuned with
+`--values <app>=<file.yaml>`, and installed into any kube context with
+`--context`. **[docs/apps.md](docs/apps.md)** describes every app, its logins
+and what the profiles change, plus presets, uninstalling and the kind/Talos
+differences.
 
 ## Reaching services in the cluster
 
@@ -110,6 +135,9 @@ security find-certificate -c "<root CA name>" -p /Library/Keychains/System.keych
   > ~/.k8slocalcli/ca-certificates/corporate-root.pem     # macOS
 ```
 
+Flux and Argo CD installed by k8slocalcli get the same CAs, so they can pull
+charts through the proxy too.
+
 ## Troubleshooting
 
 | Symptom | Fix |
@@ -118,7 +146,8 @@ security find-certificate -c "<root CA name>" -p /Library/Keychains/System.keych
 | `ImagePullBackOff` with x509 | See [Behind a corporate proxy](#behind-a-corporate-proxy). |
 | `<app>.localtest.me` does not load | The CLI warns if your DNS blocks `localtest.me`; add the printed `/etc/hosts` line. |
 | Port 80 already in use | Expected with a second cluster — use the printed port, or pass `--http-port`. |
-| Lost the Argo CD password | `k8slocalcli info <name>` |
+| Lost an app's password | `k8slocalcli info <name>` |
+| An app's step timed out | The error names the step (install, verify, postcheck); `kubectl get events -n <namespace>` shows why. |
 
 ## Development and testing
 
@@ -161,5 +190,7 @@ git tag v0.1.0 && git push origin v0.1.0
 
 ## More
 
-[docs/how-it-works.md](docs/how-it-works.md) covers the internals: provider
-details, CNIs, multi-cluster ports and subnets, the gateway and TLS setup.
+- [docs/apps.md](docs/apps.md) — every catalog app, methods, profiles, presets, uninstalling.
+- [docs/how-it-works.md](docs/how-it-works.md) — the internals: provider
+  details, CNIs, multi-cluster ports and subnets, the gateway and TLS setup,
+  the app lifecycle.

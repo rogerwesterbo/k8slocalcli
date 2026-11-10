@@ -9,16 +9,12 @@
 package apps
 
 import (
-	"context"
 	"fmt"
 	"io"
-	"os"
 	"strings"
-	"time"
 
 	"github.com/rogerwesterbo/k8slocalcli/internal/cluster"
 	"github.com/rogerwesterbo/k8slocalcli/internal/progress"
-	"github.com/rogerwesterbo/k8slocalcli/internal/runner"
 )
 
 // Target describes the cluster being installed into.
@@ -35,7 +31,21 @@ type Target struct {
 	// HTTPPort and HTTPSPort are the host ports published to the gateway.
 	HTTPPort  int
 	HTTPSPort int
+	// Provider is the k8slocalcli provider that created the cluster (kind,
+	// talos), or "" for a cluster reached through an arbitrary kube context.
+	Provider cluster.Provider
+	// LoadBalancerRange is a free IPv4 range on the nodes' container network
+	// (e.g. 172.18.255.200-172.18.255.250) for MetalLB, or "" when unknown.
+	LoadBalancerRange string
+	// CABundle is extra PEM CA certificates (a TLS-intercepting proxy's root)
+	// that the nodes trust; components that fetch charts themselves are given
+	// it too (see trustCABundle). Empty when there are none.
+	CABundle string
 }
+
+// External reports whether the target is a cluster k8slocalcli did not
+// create, reached only through its kube context.
+func (t Target) External() bool { return t.Provider == "" }
 
 // Env carries everything an installer needs.
 type Env struct {
@@ -48,106 +58,21 @@ type Env struct {
 	// Progress renders long steps (spinner + live pod status on a terminal).
 	// Nil means plain, streamed output.
 	Progress *progress.Reporter
+	// Profile sizes the apps (dev or near-production). Empty means dev.
+	Profile cluster.Profile
+	// Reinstall re-applies apps that are already installed instead of asking.
+	Reinstall bool
+	// Values are user chart values per app (canonical name), deep-merged over
+	// k8slocalcli's own values for the helm, flux and argo methods. See
+	// ParseValuesFlags.
+	Values map[string]map[string]any
+
+	// connected caches a successful connection check for this Env.
+	connected bool
 }
 
-func (e *Env) runner() *runner.Runner { return runner.New(e.Out) }
-
-// kubectl runs kubectl against the target's context.
-func (e *Env) kubectl(ctx context.Context, args ...string) error {
-	return e.runner().Run(ctx, "kubectl", append([]string{"--context", e.KubeContext}, args...)...)
-}
-
-// kubectlQuiet runs kubectl without streaming output, returning stdout.
-func (e *Env) kubectlQuiet(ctx context.Context, args ...string) (string, error) {
-	return runner.New(nil).Capture(ctx, "kubectl", append([]string{"--context", e.KubeContext}, args...)...)
-}
-
-// applyURL applies a remote manifest. Server-side apply is used throughout:
-// the Gateway API and Argo CD CRDs exceed the client-side
-// last-applied-configuration annotation limit.
-func (e *Env) applyURL(ctx context.Context, url string) error {
-	return e.kubectl(ctx, "apply", "--server-side", "--force-conflicts", "-f", url)
-}
-
-// applyYAML applies an in-memory manifest via a private temp file (it may
-// contain TLS keys; os.CreateTemp creates it 0600).
-func (e *Env) applyYAML(ctx context.Context, manifest string) error {
-	f, err := os.CreateTemp("", "k8slocalcli-*.yaml")
-	if err != nil {
-		return fmt.Errorf("creating manifest file: %w", err)
-	}
-	defer func() { _ = os.Remove(f.Name()) }()
-	if _, err := f.WriteString(manifest); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("writing manifest file: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("closing manifest file: %w", err)
-	}
-	// Quiet runner: the manifest may hold a private key, and kubectl's
-	// "configured" lines are noise. Errors still carry kubectl's output tail.
-	_, err = runner.New(nil).Capture(ctx, "kubectl", "--context", e.KubeContext,
-		"apply", "--server-side", "--force-conflicts", "-f", f.Name())
-	return err
-}
-
-// applyYAMLRetry retries applyYAML while a just-installed admission webhook
-// (cert-manager's) is still coming up and rejecting requests.
-func (e *Env) applyYAMLRetry(ctx context.Context, manifest string, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-	for {
-		err := e.applyYAML(ctx, manifest)
-		if err == nil || time.Now().After(deadline) {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(5 * time.Second):
-		}
-	}
-}
-
-// waitAvailable waits for every deployment in ns to be Available.
-func (e *Env) waitAvailable(ctx context.Context, ns string, timeout time.Duration) error {
-	return e.kubectl(ctx, "wait", "--for=condition=Available", "deployment", "--all",
-		"-n", ns, "--timeout="+timeout.String())
-}
-
-// helmChart describes a chart to install with `helm upgrade --install`.
-type helmChart struct {
-	Release   string
-	Chart     string // chart name, or a full oci:// reference
-	Repo      string // classic repo URL; empty for oci:// charts
-	Version   string
-	Namespace string
-	Set       []string // --set key=value
-}
-
-// helmInstall installs or upgrades a chart and waits for it to be ready.
-func (e *Env) helmInstall(ctx context.Context, c helmChart) error {
-	if !runner.LookPath("helm") {
-		return fmt.Errorf("helm is required to install %s via Helm; install it (e.g. brew install helm) or choose the manifest method", c.Release)
-	}
-	args := []string{"upgrade", "--install", c.Release, c.Chart,
-		"--kube-context", e.KubeContext,
-		"--namespace", c.Namespace, "--create-namespace",
-		"--version", c.Version,
-		"--wait", "--timeout", "10m",
-	}
-	if c.Repo != "" {
-		args = append(args, "--repo", c.Repo)
-	}
-	for _, s := range c.Set {
-		args = append(args, "--set", s)
-	}
-	return e.runner().Run(ctx, "helm", args...)
-}
-
-// namespaceYAML is a Namespace manifest document.
-func namespaceYAML(name string) string {
-	return fmt.Sprintf("apiVersion: v1\nkind: Namespace\nmetadata:\n  name: %s\n", name)
-}
+// production reports whether apps should be installed near-production.
+func (e *Env) production() bool { return e.Profile.Production() }
 
 // URL returns the host URL for hostname over scheme on this target, leaving
 // the port out when it is the scheme's default.
@@ -163,8 +88,8 @@ func (t Target) URL(scheme, hostname string) string {
 	return fmt.Sprintf("%s://%s:%d", scheme, hostname, port)
 }
 
-// methodsText renders a method list for messages, e.g. "helm, manifest".
-func methodsText(ms []cluster.InstallMethod) string {
+// MethodsText renders a method list for messages, e.g. "helm, manifest".
+func MethodsText(ms []cluster.InstallMethod) string {
 	parts := make([]string, len(ms))
 	for i, m := range ms {
 		parts[i] = string(m)

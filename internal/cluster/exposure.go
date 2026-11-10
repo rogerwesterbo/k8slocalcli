@@ -13,10 +13,26 @@ type InstallMethod string
 const (
 	MethodHelm     InstallMethod = "helm"
 	MethodManifest InstallMethod = "manifest"
+	// MethodFlux installs a Helm chart through Flux: a source plus a
+	// HelmRelease that Flux reconciles. Flux must be installed (or requested).
+	MethodFlux InstallMethod = "flux"
+	// MethodArgo installs a Helm chart through Argo CD: an Application that
+	// Argo CD syncs. Argo CD must be installed (or requested).
+	MethodArgo InstallMethod = "argo"
 )
 
 // InstallMethods is the ordered list of known install methods.
-var InstallMethods = []InstallMethod{MethodHelm, MethodManifest}
+var InstallMethods = []InstallMethod{MethodHelm, MethodManifest, MethodFlux, MethodArgo}
+
+// DirectMethods are the methods that do not go through a GitOps controller.
+// The exposure stack (gateway controller, cert-manager) is installed before any
+// app, so only these apply to it.
+var DirectMethods = []InstallMethod{MethodHelm, MethodManifest}
+
+// GitOps reports whether m hands the install to a GitOps controller.
+func (m InstallMethod) GitOps() bool {
+	return m == MethodFlux || m == MethodArgo
+}
 
 // Valid reports whether m is a known install method.
 func (m InstallMethod) Valid() bool {
@@ -152,8 +168,8 @@ func (e Exposure) Validate() error {
 	if !e.Controller.Valid() {
 		return fmt.Errorf("unknown gateway controller %q (supported: %s)", e.Controller, joinValues(GatewayControllers))
 	}
-	if !e.ControllerMethod.Valid() {
-		return fmt.Errorf("unknown gateway install method %q (supported: %s)", e.ControllerMethod, joinValues(InstallMethods))
+	if !e.ControllerMethod.Valid() || e.ControllerMethod.GitOps() {
+		return fmt.Errorf("unknown gateway install method %q (supported: %s)", e.ControllerMethod, joinValues(DirectMethods))
 	}
 	if !e.Channel.Valid() {
 		return fmt.Errorf("unknown Gateway API channel %q (supported: %s)", e.Channel, joinValues(GatewayChannels))
@@ -161,8 +177,8 @@ func (e Exposure) Validate() error {
 	if !e.TLS.Valid() {
 		return fmt.Errorf("unknown TLS mode %q (supported: %s)", e.TLS, joinValues(TLSModes))
 	}
-	if e.TLS == TLSVerified && !e.CertManagerMethod.Valid() {
-		return fmt.Errorf("unknown cert-manager install method %q (supported: %s)", e.CertManagerMethod, joinValues(InstallMethods))
+	if e.TLS == TLSVerified && (!e.CertManagerMethod.Valid() || e.CertManagerMethod.GitOps()) {
+		return fmt.Errorf("unknown cert-manager install method %q (supported: %s)", e.CertManagerMethod, joinValues(DirectMethods))
 	}
 	return nil
 }
@@ -177,6 +193,9 @@ type AppRequest struct {
 	// argocd.localtest.me. Empty means the app's default; ignored when exposure
 	// is off or the app has nothing to expose.
 	Host string
+	// Implicit marks a dependency added by the planner rather than asked for:
+	// when it is already installed it is left alone without asking.
+	Implicit bool
 }
 
 // hostnamePattern is a lowercase RFC 1123 DNS name with at least two labels.

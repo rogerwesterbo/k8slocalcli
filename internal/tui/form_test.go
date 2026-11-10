@@ -1,8 +1,10 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
+	"github.com/rogerwesterbo/k8slocalcli/internal/apps"
 	"github.com/rogerwesterbo/k8slocalcli/internal/cluster"
 )
 
@@ -47,8 +49,8 @@ func TestExposeOffSkipsGatewayFields(t *testing.T) {
 		t.Fatal("→ should turn exposure off")
 	}
 	_, _, _ = f.handleKey("<Tab>")
-	if got := f.focused(); got == nil || got.id != fieldApp {
-		t.Fatalf("after expose=no, Tab should skip to the first app, got %+v", got)
+	if got := f.focused(); got == nil || got.id != fieldProfile {
+		t.Fatalf("after expose=no, Tab should skip to the app profile, got %+v", got)
 	}
 	if len(f.buildSpec().Warnings()) == 0 {
 		t.Error("expose=no must produce an up-front warning")
@@ -73,38 +75,85 @@ func TestCertManagerOnlyForVerifiedTLS(t *testing.T) {
 	}
 }
 
-// Selecting an app cycles off → helm → manifest, and its hostname is editable
-// and carried into the spec only while exposure is on.
-func TestAppSelectionAndHost(t *testing.T) {
+// The picker toggles apps (default method) and cycles their methods, and the
+// selection reaches the spec with the app's default host.
+func TestAppPicker(t *testing.T) {
 	f := newForm(cluster.Spec{Name: "dev"}, nil)
-	focusOn(t, f, fieldApp)
 	if len(f.buildSpec().Apps) != 0 {
-		t.Fatal("apps should default to off")
+		t.Fatal("apps should default to none")
 	}
-	_, _, _ = f.handleKey("<Right>")
-	apps := f.buildSpec().Apps
-	if len(apps) != 1 || apps[0].Name != "argocd" || apps[0].Method != cluster.MethodHelm || apps[0].Host != "argocd.localtest.me" {
-		t.Fatalf("unexpected apps: %+v", apps)
+	focusOn(t, f, fieldApps)
+	_, _, _ = f.handleKey("<Enter>")
+	if f.open == nil {
+		t.Fatal("Enter on Apps should open the picker")
+	}
+	idx := -1
+	for i, a := range f.catalog {
+		if a.Name == "argocd" {
+			idx = i
+		}
+	}
+	for range idx {
+		_, _, _ = f.handleKey("<Down>")
+	}
+	_, _, _ = f.handleKey("<Space>")
+	got := f.buildSpec().Apps
+	if len(got) != 1 || got[0].Name != "argocd" || got[0].Method != cluster.MethodHelm || got[0].Host != "argocd.localtest.me" {
+		t.Fatalf("unexpected apps: %+v", got)
 	}
 	_, _, _ = f.handleKey("<Right>")
 	if m := f.buildSpec().Apps[0].Method; m != cluster.MethodManifest {
-		t.Errorf("second → should select manifest, got %s", m)
+		t.Errorf("→ should select manifest, got %s", m)
 	}
-
-	focusOn(t, f, fieldAppHost)
-	for range len(".localtest.me") {
-		_, _, _ = f.handleKey("<Backspace>")
-	}
-	for _, r := range "CD.localtest.me" {
-		_, _, _ = f.handleKey(string(r))
-	}
-	if h := f.buildSpec().Apps[0].Host; h != "argocdcd.localtest.me" {
-		t.Errorf("host = %q, want argocdcd.localtest.me", h)
+	_, _, _ = f.handleKey("<Escape>")
+	if f.open != nil {
+		t.Fatal("Esc should close the picker, not the form")
 	}
 
 	f.spec.Exposure.Enabled = false
 	if h := f.buildSpec().Apps[0].Host; h != "" {
 		t.Errorf("host should be dropped without exposure, got %q", h)
+	}
+}
+
+// Browsing presets changes nothing; Enter applies the shown one and "none"
+// clears it again. The profile is part of the spec.
+func TestPresetAndProfile(t *testing.T) {
+	f := newForm(cluster.Spec{Name: "dev"}, nil)
+	if f.spec.Profile != cluster.ProfileDev {
+		t.Fatalf("profile = %q, want dev", f.spec.Profile)
+	}
+	focusOn(t, f, fieldProfile)
+	_, _, _ = f.handleKey("<Right>")
+	if f.buildSpec().Profile != cluster.ProfileProduction {
+		t.Errorf("→ on profile should select production")
+	}
+	focusOn(t, f, fieldPreset)
+	_, _, _ = f.handleKey("<Right>")
+	_, _, _ = f.handleKey("<Right>")
+	_, _, _ = f.handleKey("<Left>")
+	if n := len(f.buildSpec().Apps); n != 0 {
+		t.Fatalf("browsing presets must not select apps, got %d", n)
+	}
+	_, _, _ = f.handleKey("<Enter>")
+	if got := f.focused(); got == nil || got.id != fieldPreset {
+		t.Fatal("Enter that applies a preset should stay on the field")
+	}
+	want := apps.Presets()[0].Apps
+	got := f.buildSpec().Apps
+	if len(got) != len(want) {
+		t.Fatalf("preset %s: got %+v, want %v", apps.Presets()[0].Name, got, want)
+	}
+	if f.matchingPreset() != 1 {
+		t.Errorf("selection should match preset 1")
+	}
+	_, _, _ = f.handleKey("<Left>") // back to "none"
+	if !strings.Contains(f.presetText(true), "clear") {
+		t.Errorf("none should offer to clear: %q", f.presetText(true))
+	}
+	_, _, _ = f.handleKey("<Enter>")
+	if n := len(f.buildSpec().Apps); n != 0 {
+		t.Errorf("applying none should clear the selection, %d left", n)
 	}
 }
 
