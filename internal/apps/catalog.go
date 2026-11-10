@@ -64,6 +64,7 @@ const (
 	CategoryData          Category = "data"
 	CategorySecurity      Category = "security"
 	CategoryObservability Category = "observability"
+	CategoryManagement    Category = "management"
 	CategoryDemo          Category = "demo"
 )
 

@@ -30,6 +30,17 @@ func (t *targetFlags) register(cmd *cobra.Command, verb string) {
 	cmd.Flags().StringVar(&t.kubeContext, "context", "", verb+" any cluster by kube context instead of a k8slocalcli cluster")
 }
 
+// flagsText renders the chosen target as flags, for "run this next" hints.
+func (t *targetFlags) flagsText() string {
+	switch {
+	case t.kubeContext != "":
+		return "--context " + t.kubeContext
+	case t.cluster != "":
+		return "--cluster " + t.cluster
+	}
+	return ""
+}
+
 // resolve builds the Env for the chosen cluster and checks it answers. ok is
 // false when the user cancelled the cluster picker.
 func (t *targetFlags) resolve(ctx context.Context, out io.Writer, ask *prompter) (env *apps.Env, ok bool, err error) {

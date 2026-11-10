@@ -67,6 +67,7 @@ k8slocalcli delete dev
 | `k8slocalcli app install argocd --cluster dev` | install apps into an existing cluster |
 | `k8slocalcli app uninstall` | form: pick a cluster and the installed apps to remove |
 | `k8slocalcli app uninstall argocd --cluster dev` | remove apps (`--purge` also deletes their data) |
+| `k8slocalcli app doctor --cluster dev [--fix]` | find (and fix) pods that Pod Security rejects, e.g. on Talos |
 | `k8slocalcli kubeconfig dev --merge` | add the cluster to `~/.kube/config` and switch to it |
 | `k8slocalcli delete [name]` | delete a cluster |
 | `k8slocalcli upgrade` | update k8slocalcli itself |
@@ -147,6 +148,7 @@ charts through the proxy too.
 | `<app>.localtest.me` does not load | The CLI warns if your DNS blocks `localtest.me`; add the printed `/etc/hosts` line. |
 | Port 80 already in use | Expected with a second cluster — use the printed port, or pass `--http-port`. |
 | Lost an app's password | `k8slocalcli info <name>` |
+| Pods never start or a volume stays `Pending` on Talos | `k8slocalcli app doctor --cluster <name> --fix` — Talos rejects pods needing host access unless their namespace allows it. |
 | An app's step timed out | The error names the step (install, verify, postcheck); `kubectl get events -n <namespace>` shows why. |
 
 ## Development and testing

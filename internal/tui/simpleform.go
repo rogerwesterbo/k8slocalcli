@@ -138,8 +138,10 @@ func (f *simpleForm) layout() {
 	termW, _ := ui.TerminalDimensions()
 	x0, x1, mid := formBounds(termW)
 	y := formMargin
-	f.title.SetRect(x0, y, x1, y+2)
-	y += 2
+	// termui keeps a one-cell margin inside every widget, border or not, so
+	// one line of text needs three rows.
+	f.title.SetRect(x0, y, x1, y+3)
+	y += 3
 	for _, p := range f.boxes {
 		p.SetRect(x0, y, x1, y+fieldH)
 		y += fieldH

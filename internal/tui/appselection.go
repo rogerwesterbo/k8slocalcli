@@ -25,7 +25,14 @@ type appSelection struct {
 	preset int
 	// installed marks apps already in the target cluster (app install only).
 	installed map[string]bool
+	// method is the Method field: one install method for every selected app
+	// that supports it, or "" for each app's own (chosen in the checklist).
+	method cluster.InstallMethod
 }
+
+// methodChoices are the Method field's values: each app's own, then every
+// install method.
+var methodChoices = append([]cluster.InstallMethod{""}, cluster.InstallMethods...)
 
 // newAppSelection starts from the catalog defaults, pre-filled with initial
 // (e.g. from --app flags).
@@ -115,7 +122,89 @@ func (s *appSelection) applyPreset() bool {
 			s.appChoice[i] = 1
 		}
 	}
+	s.applyMethod()
 	return true
+}
+
+// cycleMethod moves the Method field and applies it to the selected apps.
+func (s *appSelection) cycleMethod(delta int) {
+	s.method = cycle(methodChoices, s.method, delta)
+	s.applyMethod()
+}
+
+// applyMethod sets the Method field's method on every selected app that
+// supports it; the others keep theirs.
+func (s *appSelection) applyMethod() {
+	if s.method == "" {
+		return
+	}
+	for i, a := range s.catalog {
+		if s.appChoice[i] == 0 {
+			continue
+		}
+		if j := slices.Index(a.Methods, s.method); j >= 0 {
+			s.appChoice[i] = j + 1
+		}
+	}
+}
+
+// syncMethod makes the Method field match the selection after per-app
+// changes in the checklist: the shared method when every selected app uses
+// the same one, "each app's own" otherwise.
+func (s *appSelection) syncMethod() {
+	s.method = s.commonMethod()
+}
+
+// commonMethod returns the method all selected apps use, or "".
+func (s *appSelection) commonMethod() cluster.InstallMethod {
+	var common cluster.InstallMethod
+	for i, a := range s.catalog {
+		if s.appChoice[i] == 0 {
+			continue
+		}
+		m := a.Methods[s.appChoice[i]-1]
+		if common != "" && m != common {
+			return ""
+		}
+		common = m
+	}
+	return common
+}
+
+// methodText renders the Method field, naming selected apps that cannot use
+// the chosen method (they keep their own).
+func (s *appSelection) methodText(bool) string {
+	labels := make([]string, len(methodChoices))
+	selected := ""
+	for i, m := range methodChoices {
+		labels[i] = string(m)
+		if m == "" {
+			labels[i] = "each app's own"
+		}
+		if m == s.method {
+			selected = labels[i]
+		}
+	}
+	return options(labels, selected)
+}
+
+// methodNote names the selected apps that cannot use the Method field's
+// method and keep their own, e.g. "no manifest for crossplane (keeps helm)";
+// "" when there are none. Forms show it in their status line.
+func (s *appSelection) methodNote() string {
+	if s.method == "" {
+		return ""
+	}
+	var keep []string
+	for i, a := range s.catalog {
+		if s.appChoice[i] > 0 && !slices.Contains(a.Methods, s.method) {
+			keep = append(keep, fmt.Sprintf("%s (keeps %s)", a.Name, a.Methods[s.appChoice[i]-1]))
+		}
+	}
+	if len(keep) == 0 {
+		return ""
+	}
+	return "no " + string(s.method) + " for " + strings.Join(keep, ", ")
 }
 
 // presetText renders the Preset field: the browsed preset, what it holds, and
@@ -176,12 +265,24 @@ func (s *appSelection) matchingPreset() int {
 	return 0
 }
 
-// appsText summarises the selection on the Apps field.
+// appsText summarises the selection on the Apps field with each app's
+// method: "4 via helm: a, b, …" when they share one, "a (helm), b (flux)"
+// otherwise.
 func (s *appSelection) appsText(focused bool) string {
 	var names []string
 	for i, a := range s.catalog {
 		if s.appChoice[i] > 0 {
 			names = append(names, a.Name)
+		}
+	}
+	if m := s.commonMethod(); m != "" {
+		return strings.Replace(selectionText(names, focused), ": ", " via "+string(m)+": ", 1)
+	}
+	for k, n := range names {
+		for i, a := range s.catalog {
+			if a.Name == n {
+				names[k] = fmt.Sprintf("%s (%s)", n, a.Methods[s.appChoice[i]-1])
+			}
 		}
 	}
 	return selectionText(names, focused)

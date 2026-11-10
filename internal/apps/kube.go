@@ -186,14 +186,26 @@ func (e *Env) ensurePrivilegedNamespace(ctx context.Context, ns string) error {
 	// (local-path, MetalLB, ...) is applied server-side by the "kubectl"
 	// manager, and server-side apply drops fields that manager owns but no
 	// longer declares — labels applied the same way would vanish.
-	_, err := e.kubectlQuiet(ctx, "label", "--overwrite", "namespace", ns,
-		"pod-security.kubernetes.io/enforce=privileged",
-		"pod-security.kubernetes.io/audit=privileged",
-		"pod-security.kubernetes.io/warn=privileged")
+	_, err := e.kubectlQuiet(ctx, append([]string{"label", "--overwrite", "namespace", ns}, privilegedLabels...)...)
 	if err != nil {
 		return fmt.Errorf("labelling namespace %s for privileged pods: %w", ns, err)
 	}
 	return nil
+}
+
+// privilegedLabels are the Pod Security labels ensurePrivilegedNamespace sets.
+var privilegedLabels = []string{
+	"pod-security.kubernetes.io/enforce=privileged",
+	"pod-security.kubernetes.io/audit=privileged",
+	"pod-security.kubernetes.io/warn=privileged",
+}
+
+// namespacePrivileged reports whether ns already enforces the privileged
+// Pod Security level.
+func (e *Env) namespacePrivileged(ctx context.Context, ns string) bool {
+	out, err := e.kubectlQuiet(ctx, "get", "namespace", ns,
+		"-o", `jsonpath={.metadata.labels.pod-security\.kubernetes\.io/enforce}`)
+	return err == nil && strings.TrimSpace(out) == "privileged"
 }
 
 // isTalos reports whether the cluster's nodes run Talos Linux (also for

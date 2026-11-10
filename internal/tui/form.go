@@ -31,6 +31,7 @@ const (
 	fieldProfile // dev / production
 	fieldPreset  // browse presets; Enter applies one (or "none" to clear)
 	fieldApps    // opens the app picker
+	fieldMethod  // one install method for every selected app, or each app's own
 )
 
 const (
@@ -124,7 +125,10 @@ func newForm(initial cluster.Spec, versions map[cluster.Provider][]string) *form
 	initial.Exposure = withExposureDefaults(initial.Exposure)
 
 	f := &form{spec: initial, versions: versions, appSelection: newAppSelection(initial.Apps, nil)}
-	f.onClose = func() { f.preset = f.matchingPreset() }
+	f.onClose = func() {
+		f.preset = f.matchingPreset()
+		f.syncMethod()
+	}
 
 	// Resolve the initial version selection: honour a pre-set version, else
 	// default to the latest (index 0).
@@ -155,6 +159,7 @@ func newForm(initial cluster.Spec, versions map[cluster.Provider][]string) *form
 	add(fieldProfile, " App profile — dev: testing · production: replicas, persistence ", false)
 	add(fieldPreset, " Preset — ←/→ browse, Enter use ", false)
 	add(fieldApps, " Apps ", false)
+	add(fieldMethod, " Install method — for every selected app that supports it ", false)
 	if !f.spec.Profile.Valid() {
 		f.spec.Profile = cluster.ProfileDev
 	}
@@ -280,6 +285,9 @@ func (f *form) render() {
 		f.setStatus(f.err, "⚠️  "+warnings[0], ui.ColorYellow)
 	default:
 		text := summary(spec)
+		if note := f.methodNote(); note != "" {
+			text += "\n" + note
+		}
 		if len(warnings) > 0 {
 			text += "\n⚠️  " + warnings[0]
 		}
@@ -343,6 +351,8 @@ func (f *form) fieldText(fl *field, focused bool) string {
 		return f.presetText(focused)
 	case fieldApps:
 		return f.appsText(focused)
+	case fieldMethod:
+		return f.methodText(focused)
 	}
 	return ""
 }
@@ -500,6 +510,8 @@ func (f *form) adjust(delta int) {
 		f.browsePreset(delta)
 	case fieldApps:
 		f.openApps()
+	case fieldMethod:
+		f.cycleMethod(delta)
 	}
 }
 

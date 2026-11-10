@@ -17,7 +17,7 @@ func newAppCmd() *cobra.Command {
 		Use:   "app",
 		Short: "List, install and uninstall applications in a cluster",
 	}
-	cmd.AddCommand(newAppListCmd(), newAppInstallCmd(), newAppUninstallCmd())
+	cmd.AddCommand(newAppListCmd(), newAppInstallCmd(), newAppUninstallCmd(), newAppDoctorCmd())
 	return cmd
 }
 

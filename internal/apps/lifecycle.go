@@ -83,6 +83,7 @@ func InstallAll(ctx context.Context, env *Env, reqs []cluster.AppRequest) error 
 	if err := CheckConnection(ctx, env); err != nil {
 		return err
 	}
+	repairPodSecurity(ctx, env)
 	for _, req := range plan {
 		if err := Install(ctx, env, req); err != nil {
 			return err

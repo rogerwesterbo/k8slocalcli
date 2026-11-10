@@ -32,6 +32,7 @@ const (
 	installProfile = iota
 	installPreset
 	installApps
+	installMethod
 	installReinstall
 )
 
@@ -84,6 +85,11 @@ func newInstallForm(opts InstallOptions) *installForm {
 				adjust: func(int) { openApps() },
 				enter:  openApps,
 			},
+			installMethod: {
+				title:  " Install method — for every selected app that supports it ",
+				text:   f.methodText,
+				adjust: f.cycleMethod,
+			},
 			installReinstall: {
 				title: " Already installed apps ",
 				text: func(bool) string {
@@ -93,7 +99,10 @@ func newInstallForm(opts InstallOptions) *installForm {
 			},
 		},
 	)
-	f.onClose = func() { f.preset = f.matchingPreset() }
+	f.onClose = func() {
+		f.preset = f.matchingPreset()
+		f.syncMethod()
+	}
 	f.submit = func() string {
 		if f.selectedCount() == 0 {
 			return "select at least one app (Apps → Enter) or a preset"
@@ -128,7 +137,11 @@ func (f *installForm) statusText() string {
 	if n == 0 {
 		return "Nothing selected yet: pick a preset, or open Apps with Enter."
 	}
-	return fmt.Sprintf("Will install %s with the %s profile; dependencies (e.g. cnpg for keycloak) are added automatically.", plural(n, "app"), f.profile)
+	text := fmt.Sprintf("Will install %s with the %s profile; dependencies (e.g. cnpg for keycloak) are added automatically.", plural(n, "app"), f.profile)
+	if note := f.methodNote(); note != "" {
+		text += "\n" + note
+	}
+	return text
 }
 
 // plural renders "1 app" / "3 apps".

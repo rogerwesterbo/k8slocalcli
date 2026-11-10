@@ -42,7 +42,10 @@ left alone.
 | `argo` | an Argo CD `Application` — Argo CD installs and keeps it in sync |
 
 `flux` and `argo` use the same chart and values as `helm`, so switching method
-does not change what you get. Flux and Argo CD themselves are installed with
+does not change what you get. In the forms, the **Install method** field sets
+one method for every selected app that supports it (the status line names the
+ones that keep their own); a single app's method is changed with ←/→ on its row
+in the Apps checklist. Flux and Argo CD themselves are installed with
 `helm` or `manifest`.
 
 ## Profiles: dev or production
@@ -143,13 +146,18 @@ Grafana at `grafana.localtest.me` (login shown by `info`). Picks up
 ServiceMonitors from every namespace. dev: 1 day retention, no volumes.
 production: 15 days on a 20Gi volume, Alertmanager and Grafana on volumes.
 
-### Demo
+### Management
 
 **k8sdockside** — a Kubernetes dashboard at `k8sdockside.localtest.me`, newest
 release. Admin login generated (shown by `info`). Every signed-in user acts with
 the dashboard's own permissions: `cluster-admin` on dev, read-only on
 production — change it with [your own values](#your-own-chart-values). Its data
-is on a volume whenever the cluster has a default StorageClass.
+is on a volume whenever the cluster has a default StorageClass. It always runs
+**one replica**, on production too: open terminals, log streams and watches
+live in the server's memory, so the chart fixes the Deployment at one replica
+(with the `Recreate` strategy) and has no setting to change that.
+
+### Demo
 
 **nyancat** — a small demo web app at `nyancat.localtest.me`, newest release.
 
@@ -226,7 +234,14 @@ uninstalled, or its manifest is deleted.
 
 - Talos enforces Pod Security `baseline`; apps that need host access (local-path,
   NFS, Longhorn, MetalLB, kube-prometheus-stack, Trivy) get their namespace
-  labelled `privileged` automatically.
+  labelled `privileged` automatically. If one was installed without the labels
+  (by an older k8slocalcli), the next `app install` adds them — otherwise, for
+  example, a new app's volume stays Pending because local-path's helper pod is
+  rejected.
+- `k8slocalcli app doctor --cluster <name>` finds pods Pod Security rejects in
+  **any** namespace, your own workloads included, and `--fix` allows them
+  (catalog apps directly; other namespaces only after you confirm, since that
+  turns their restrictions off).
 - Talos has no default StorageClass: install `local-path` first for cnpg,
   Keycloak and the production profile.
 - kind ships local-path already; it is detected and left alone.

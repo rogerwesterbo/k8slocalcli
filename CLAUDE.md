@@ -80,6 +80,7 @@ Understanding these four seams is enough to be productive:
   | `catalog.go` | `App` (fields in execution order, rules in its doc comment), `catalog`, `Plan`, presets |
   | `lifecycle.go` | install: `InstallAll`/`Install` → connect → precheck → prepare+install → verify → configure+postcheck → route/notes, each phase with its own timeout (`withTimeout`) |
   | `uninstall.go` | `PlanUninstall`, `DetectInstallation` (typed `InstallState`), `Dependants`, `Uninstall` |
+  | `doctor.go` | Pod Security: `PodSecurityFindings` (catalog gaps + FailedCreate rejections anywhere), `repairPodSecurity` (run by `InstallAll`) |
   | `helm.go` / `gitops.go` | the three chart methods: `helmInstall`, `fluxInstall`, `argoInstall`; `renderChart` merges app values + `--values` |
   | `kube.go` | cluster building blocks: `kubectl*`, `apply*`, `exists`, Secrets, namespaces, `defaultStorageClass`, `isTalos`, `retry`, `remaining` |
   | `checks.go` | reusable preflights (`requireDefaultStorageClass`) and functional checks (`storageSmokeTest`) |
@@ -100,7 +101,11 @@ Understanding these four seams is enough to be productive:
   Uninstall finds the method live; manifest installs are only recognised by the
   `k8slocalcli.io/installed-by=manifest` label. Never delete CRDs or protected
   namespaces. Verify new apps on **both** kind and Talos (see the Talos Pod
-  Security gotcha below). Adding a gateway controller = implement
+  Security gotcha below), and after adding an app or bumping a chart run the
+  opt-in `TestPodSecurityAudit` (`podsecurity_audit_test.go`) against a
+  throwaway cluster: it fails when an app's rendered workloads break Pod
+  Security baseline but the app is not `Privileged`. Pods an app creates at
+  runtime are not rendered, so judge those yourself (local-path, Trivy). Adding a gateway controller = implement
   `GatewayController` (contract in `gateway.go`), add it to `controllers` and
   `cluster.GatewayControllers`.
 

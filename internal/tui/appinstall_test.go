@@ -76,3 +76,54 @@ func TestInstallFormFields(t *testing.T) {
 		t.Error("Esc should cancel the form")
 	}
 }
+
+// The Method field sets one method on every selected app that supports it
+// (others keep theirs and are named), shows in the Apps summary, and falls
+// back to "each app's own" when the checklist makes them differ.
+func TestInstallFormMethod(t *testing.T) {
+	f := newInstallForm(InstallOptions{Target: "cluster dev"})
+	idx := map[string]int{}
+	for i, a := range f.catalog {
+		idx[a.Name] = i
+	}
+	f.appChoice[idx["nyancat"]] = 1    // helm
+	f.appChoice[idx["crossplane"]] = 1 // helm; has no manifest
+
+	if got := f.appsText(false); !strings.Contains(got, "via helm") {
+		t.Errorf("apps text should show the shared method: %q", got)
+	}
+	f.focus = installMethod
+	for f.method != "manifest" {
+		f.handleKey("<Right>")
+	}
+	if m := f.catalog[idx["crossplane"]].Methods[f.appChoice[idx["crossplane"]]-1]; m != "helm" {
+		t.Errorf("crossplane has no manifest and must keep helm, got %s", m)
+	}
+	if note := f.methodNote(); !strings.Contains(note, "crossplane (keeps helm)") {
+		t.Errorf("note = %q", note)
+	}
+	// nyancat has no manifest either, so both keep helm: still one method.
+	if got := f.appsText(false); !strings.Contains(got, "via helm") {
+		t.Errorf("apps text = %q", got)
+	}
+
+	f.focus = installMethod
+	for f.method != "flux" {
+		f.handleKey("<Right>")
+	}
+	if got := f.appsText(false); !strings.Contains(got, "via flux") {
+		t.Errorf("both support flux, want shared flux: %q", got)
+	}
+	// Change one app in the checklist: the field becomes "each app's own".
+	f.focus = installApps
+	f.handleKey("<Enter>")
+	f.open.cursor = idx["nyancat"]
+	f.handleKey("<Left>") // flux → the method before it (helm)
+	f.handleKey("<Escape>")
+	if f.method != "" {
+		t.Errorf("after a per-app change the Method field should be each app's own, got %q", f.method)
+	}
+	if got := f.appsText(false); !strings.Contains(got, "(") {
+		t.Errorf("mixed methods should be listed per app: %q", got)
+	}
+}
