@@ -117,6 +117,22 @@ func TestChartsRender(t *testing.T) {
 	}
 }
 
+// Routing is Gateway API only: nyan-cat's chart enables an Ingress by default,
+// so its values must turn it off for every method and profile.
+func TestNyanCatHasNoIngress(t *testing.T) {
+	for _, profile := range cluster.Profiles {
+		env := &Env{Target: Target{Name: "t", Provider: cluster.ProviderKind}, Profile: profile}
+		c, err := nyanCatApp.renderChart(t.Context(), env, "nyancat.localtest.me")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ingress, _ := c.Values["ingress"].(map[string]any)
+		if ingress["enabled"] != false {
+			t.Errorf("%s: ingress.enabled = %v, want false", profile, ingress["enabled"])
+		}
+	}
+}
+
 func assertKinds(t *testing.T, name, manifest string) {
 	t.Helper()
 	for _, doc := range splitDocuments(manifest) {

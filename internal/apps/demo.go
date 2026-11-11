@@ -30,7 +30,9 @@ var nyanCatApp = App{
 		Namespace: nyanCatNamespace,
 	},
 	values: func(_ context.Context, env *Env, _ string) (map[string]any, error) {
-		values := map[string]any{}
+		// The chart enables an nginx Ingress by default; k8slocalcli routes
+		// through the Gateway API (Expose → HTTPRoute) instead.
+		values := map[string]any{"ingress": map[string]any{"enabled": false}}
 		if env.production() {
 			values["replicaCount"] = 2
 		}
