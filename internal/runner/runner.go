@@ -8,9 +8,15 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
+
+// cancelGrace is how long a cancelled command may take to exit after its
+// interrupt before it is killed.
+const cancelGrace = 15 * time.Second
 
 // Runner executes external commands and writes their combined stdout/stderr to
 // Out. A zero Runner discards output; set Out to stream progress to the user.
@@ -53,6 +59,18 @@ func (r *Runner) run(ctx context.Context, name string, args ...string) (stdout, 
 	// values such as the cluster name are validated by cluster.Spec.Validate()
 	// before reaching here. This is the intended behaviour of an orchestrator.
 	cmd := exec.CommandContext(ctx, name, args...) // #nosec G204
+	// On cancel, interrupt rather than kill: helm marks an interrupted
+	// release failed, so the next `upgrade --install` proceeds, while a
+	// killed one stays pending-install and blocks every later upgrade.
+	// Whatever still runs after cancelGrace is killed. (Windows has no
+	// interrupt signal, so it is killed straight away.)
+	cmd.Cancel = func() error {
+		if err := cmd.Process.Signal(os.Interrupt); err != nil {
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = cancelGrace
 
 	var outBuf, errBuf bytes.Buffer
 	// Mirror each stream to the caller-visible writer and to a buffer so we can

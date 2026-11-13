@@ -95,14 +95,14 @@ func SetupExposure(ctx context.Context, env *Env, exp cluster.Exposure) error {
 		env.URL("http", "<app>."+cluster.LocalDomain), env.URL("https", "<app>."+cluster.LocalDomain))
 
 	if err := env.step(ctx, fmt.Sprintf("Installing Gateway API %s CRDs (%s channel)", ctrl.GatewayAPIVersion(), exp.Channel), "",
-		func(se *Env) error {
+		func(ctx context.Context, se *Env) error {
 			return se.applyURL(ctx, gatewayAPIManifestURL(ctrl.GatewayAPIVersion(), exp.Channel))
 		}); err != nil {
 		return fmt.Errorf("installing Gateway API CRDs: %w", err)
 	}
 
-	if err := env.step(ctx, fmt.Sprintf("Installing %s via %s — pulling images, starting the controller", ctrl.Description(), exp.ControllerMethod), envoyNamespace,
-		func(se *Env) error { return ctrl.Install(ctx, se, exp.ControllerMethod) }); err != nil {
+	if err := env.rolloutStep(ctx, fmt.Sprintf("Installing %s via %s — pulling images, starting the controller", ctrl.Description(), exp.ControllerMethod), envoyNamespace,
+		func(ctx context.Context, se *Env) error { return ctrl.Install(ctx, se, exp.ControllerMethod) }); err != nil {
 		return fmt.Errorf("installing %s: %w", ctrl.Description(), err)
 	}
 
@@ -116,8 +116,8 @@ func SetupExposure(ctx context.Context, env *Env, exp cluster.Exposure) error {
 		return err
 	}
 
-	if err := env.step(ctx, fmt.Sprintf("Starting the gateway proxy on node %s", env.GatewayNode), envoyNamespace,
-		func(se *Env) error {
+	if err := env.rolloutStep(ctx, fmt.Sprintf("Starting the gateway proxy on node %s", env.GatewayNode), envoyNamespace,
+		func(ctx context.Context, se *Env) error {
 			if err := se.applyYAML(ctx, gatewayYAML(ctrl.GatewayClassName())); err != nil {
 				return fmt.Errorf("creating gateway: %w", err)
 			}

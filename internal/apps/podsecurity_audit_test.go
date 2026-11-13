@@ -3,6 +3,7 @@ package apps
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -71,29 +72,9 @@ func baselineViolations(ctx context.Context, t *testing.T, env *Env, a App) stri
 		t.Fatal(err)
 	}
 
-	c, err := a.renderChart(ctx, env, "audit.localtest.me")
+	rendered, err := renderChartYAML(ctx, env, a, ns)
 	if err != nil {
 		t.Fatal(err)
-	}
-	values, err := c.valuesYAML()
-	if err != nil {
-		t.Fatal(err)
-	}
-	valuesFile, err := writeTemp("psa-audit-*.yaml", values)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = os.Remove(valuesFile) }()
-	args := []string{"template", c.Release, c.Chart, "--namespace", ns, "--values", valuesFile}
-	if c.Repo != "" {
-		args = append(args, "--repo", c.Repo)
-	}
-	if c.Version != "" {
-		args = append(args, "--version", c.Version)
-	}
-	rendered, err := runner.New(nil).Capture(ctx, "helm", args...)
-	if err != nil {
-		t.Fatalf("helm template: %v", err)
 	}
 	manifest, err := writeTemp("psa-audit-*.yaml", rendered)
 	if err != nil {
@@ -114,4 +95,34 @@ func baselineViolations(ctx context.Context, t *testing.T, env *Env, a App) stri
 		}
 	}
 	return strings.Join(warnings, "\n")
+}
+
+// renderChartYAML renders the app's chart with its values for env (as
+// `helm template` into namespace ns), for the audits.
+func renderChartYAML(ctx context.Context, env *Env, a App, ns string) (string, error) {
+	c, err := a.renderChart(ctx, env, "audit.localtest.me")
+	if err != nil {
+		return "", err
+	}
+	values, err := c.valuesYAML()
+	if err != nil {
+		return "", err
+	}
+	valuesFile, err := writeTemp("audit-values-*.yaml", values)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = os.Remove(valuesFile) }()
+	args := []string{"template", c.Release, c.Chart, "--namespace", ns, "--values", valuesFile}
+	if c.Repo != "" {
+		args = append(args, "--repo", c.Repo)
+	}
+	if c.Version != "" {
+		args = append(args, "--version", c.Version)
+	}
+	out, err := runner.New(nil).Capture(ctx, "helm", args...)
+	if err != nil {
+		return "", fmt.Errorf("helm template %s: %w", c.Chart, err)
+	}
+	return out, nil
 }

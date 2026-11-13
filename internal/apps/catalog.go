@@ -1,8 +1,10 @@
 package apps
 
 import (
+	"cmp"
 	"context"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -82,7 +84,9 @@ const (
 // (--purge) dataNamespaces and Namespace deleted.
 //
 // Rules a new app must follow:
-//   - Pin chart versions after checking them (`helm show chart`).
+//   - Pin chart versions after checking them (`helm show chart`), then run
+//     TestImageArchAudit for the app: every image needs an amd64 and an
+//     arm64 build unless the app narrows Arches.
 //   - values must be plain maps (users merge their own over them with
 //     --values) and may read the cluster (default StorageClass, Talos).
 //   - notes must read live state, never env.Profile: `info` does not know
@@ -133,6 +137,11 @@ type App struct {
 	// DataNamespaces are namespaces outside Namespace that the app creates
 	// for data (cnpg's sample postgres cluster); --purge deletes them too.
 	DataNamespaces []string
+	// Arches lists the node CPU architectures (as a node reports them in
+	// status.nodeInfo.architecture) the app's images are built for; empty
+	// means defaultArches. The precheck refuses clusters with no such node,
+	// and TestImageArchAudit fails when a pinned image lacks one of them.
+	Arches []string
 
 	// --- how to install (sources) ---
 
@@ -175,6 +184,18 @@ type App struct {
 
 	// beforeRemove runs before uninstalling, e.g. Longhorn's deletion flag.
 	beforeRemove func(ctx context.Context, env *Env) error
+}
+
+// defaultArches are the node architectures every app must support unless it
+// sets Arches: Intel/AMD machines and Apple Silicon (whose Docker nodes are
+// arm64).
+var defaultArches = []string{"amd64", "arm64"}
+
+func (a App) arches() []string {
+	if len(a.Arches) > 0 {
+		return a.Arches
+	}
+	return defaultArches
 }
 
 // catalog is ordered as shown to the user: by category, then roughly by how
@@ -255,7 +276,7 @@ func Resolve(req cluster.AppRequest) (cluster.AppRequest, error) {
 	}
 	req.Name = app.Name
 	if req.Method == "" {
-		req.Method = app.Methods[0]
+		req.Method, req.MethodDefaulted = app.Methods[0], true
 	}
 	if !supports(app.Methods, req.Method) {
 		return req, fmt.Errorf("%s cannot be installed via %s (supported: %s)", app.Name, req.Method, MethodsText(app.Methods))
@@ -297,6 +318,17 @@ func dependencies(app App, method cluster.InstallMethod) []string {
 // depends on, adding missing dependencies (with their default method, marked
 // Implicit so an already-installed one is skipped silently). added lists the
 // dependencies that were not requested, for telling the user.
+// storageRank orders storage apps first, by catalog position; every other
+// app ranks after them, equally.
+func storageRank(name string) int {
+	for i, a := range catalog {
+		if a.Name == name && a.Category == CategoryStorage {
+			return i
+		}
+	}
+	return len(catalog)
+}
+
 func Plan(reqs []cluster.AppRequest) (plan []cluster.AppRequest, added []string, err error) {
 	requested := map[string]cluster.AppRequest{}
 	var order []string
@@ -311,6 +343,12 @@ func Plan(reqs []cluster.AppRequest) (plan []cluster.AppRequest, added []string,
 		requested[r.Name] = r
 		order = append(order, r.Name)
 	}
+	// Storage first (in catalog order: local-path before nfs, which needs a
+	// default StorageClass itself): apps with volumes check for a default
+	// StorageClass, so `kube-prometheus-stack local-path` must still work.
+	slices.SortStableFunc(order, func(a, b string) int {
+		return cmp.Compare(storageRank(a), storageRank(b))
+	})
 
 	state := map[string]int{} // 0 unvisited, 1 visiting, 2 done
 	var visit func(name, by string) error

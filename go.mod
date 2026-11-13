@@ -1,11 +1,11 @@
 module github.com/rogerwesterbo/k8slocalcli
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/gizak/termui/v3 v3.1.0
 	github.com/spf13/cobra v1.10.2
-	golang.org/x/sys v0.49.0
+	golang.org/x/sys v0.50.0
 	sigs.k8s.io/yaml v1.6.0
 )
 

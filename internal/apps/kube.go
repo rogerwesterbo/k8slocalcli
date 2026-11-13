@@ -142,14 +142,16 @@ func (e *Env) defaultStorageClass(ctx context.Context) string {
 	return strings.TrimSpace(strings.Split(strings.TrimSpace(out), "\n")[0])
 }
 
-// helmManaged reports whether the app's first detected resource carries
-// Helm's ownership label.
+// helmManaged reports whether the app's first detected resource is owned by
+// a Helm release: the meta.helm.sh/release-name annotation Helm checks
+// before adopting it. Not the managed-by=Helm label: charts rendered by
+// Argo CD carry that too, and Helm then refuses the install.
 func (e *Env) helmManaged(ctx context.Context, app App) bool {
 	for _, ref := range app.Detect {
 		out, err := e.kubectlQuiet(ctx, "get", ref, "-n", app.Namespace,
-			"-o", `jsonpath={.metadata.labels.app\.kubernetes\.io/managed-by}`)
+			"-o", `jsonpath={.metadata.annotations.meta\.helm\.sh/release-name}`)
 		if err == nil {
-			return strings.TrimSpace(out) == "Helm"
+			return strings.TrimSpace(out) != ""
 		}
 	}
 	return false

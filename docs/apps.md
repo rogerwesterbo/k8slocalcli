@@ -81,7 +81,8 @@ created; add an `IPAddressPool` yourself.
 **local-path** — node-local volumes, StorageClass `local-path` (made the
 default when there is none). kind already ships it, so on kind it is reported
 as installed and left alone. On Talos volumes go to
-`/var/local-path-provisioner`.
+`/var/lib/kubelet/local-path-provisioner` (the only part of `/var` Talos' kubelet
+shares with the node, which volumes mounted with a `subPath` need).
 
 **nfs** — an NFS server inside the cluster plus its provisioner: StorageClass
 `nfs` with **ReadWriteMany** volumes, no NFS server needed elsewhere. dev keeps
@@ -144,7 +145,10 @@ to fixable vulnerabilities and two at a time.
 **kube-prometheus-stack** (also `prometheus`) — Prometheus, Alertmanager and
 Grafana at `grafana.localtest.me` (login shown by `info`). Picks up
 ServiceMonitors from every namespace. dev: 1 day retention, no volumes.
-production: 15 days on a 20Gi volume, Alertmanager and Grafana on volumes.
+production: 15 days on a 20Gi volume, Alertmanager and Grafana on volumes, so
+it needs a default StorageClass (install `local-path` first on Talos; kind has
+one). The Prometheus Operator's CRDs are installed by k8slocalcli itself and
+ready before the operator starts; they stay when the app is uninstalled.
 
 ### Management
 

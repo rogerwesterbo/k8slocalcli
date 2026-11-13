@@ -63,7 +63,7 @@ func setupVerifiedTLS(ctx context.Context, env *Env, method cluster.InstallMetho
 	}
 
 	title := fmt.Sprintf("Installing cert-manager %s via %s, issuing the *.%s certificate", certManagerVersion, method, cluster.LocalDomain)
-	if err := env.step(ctx, title, certManagerNamespace, func(se *Env) error {
+	if err := env.rolloutStep(ctx, title, certManagerNamespace, func(ctx context.Context, se *Env) error {
 		return issueVerifiedCert(ctx, se, method, caCert, caKey)
 	}); err != nil {
 		return err

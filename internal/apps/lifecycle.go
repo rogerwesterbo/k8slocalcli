@@ -113,6 +113,11 @@ func Install(ctx context.Context, env *Env, req cluster.AppRequest) error {
 		return fmt.Errorf("%s precheck: %w", app.Name, err)
 	}
 	if installed {
+		if !implicit {
+			if req.Method, err = reapplyMethod(ctx, env, app, req); err != nil {
+				return err
+			}
+		}
 		switch reapply, why := shouldReapply(ctx, env, app, req.Method, implicit); {
 		case !reapply:
 			fmt.Fprintf(env.Out, "⏭️  %s is already installed in %s%s — leaving it as it is\n", app.Name, env.Name, why)
@@ -132,7 +137,7 @@ func Install(ctx context.Context, env *Env, req cluster.AppRequest) error {
 	}
 
 	title := fmt.Sprintf("Installing %s via %s (%s profile)", app.Description, req.Method, env.Profile.OrDefault())
-	if err := env.step(ctx, title, app.Namespace, func(se *Env) error {
+	if err := env.rolloutStep(ctx, title, app.Namespace, func(ctx context.Context, se *Env) error {
 		return withTimeout(ctx, app.timeout(), "install", func(ctx context.Context) error {
 			return installApp(ctx, se, app, req.Method, host)
 		})
@@ -140,7 +145,7 @@ func Install(ctx context.Context, env *Env, req cluster.AppRequest) error {
 		return fmt.Errorf("installing %s: %w", app.Name, err)
 	}
 
-	if err := env.step(ctx, "Verifying "+app.Name+" — waiting for every workload to be ready", app.Namespace, func(se *Env) error {
+	if err := env.rolloutStep(ctx, "Verifying "+app.Name+" — waiting for every workload to be ready", app.Namespace, func(ctx context.Context, se *Env) error {
 		return withTimeout(ctx, verifyTimeout, "verify", func(ctx context.Context) error {
 			return verifyWorkloads(ctx, se, app)
 		})
@@ -148,7 +153,7 @@ func Install(ctx context.Context, env *Env, req cluster.AppRequest) error {
 		return fmt.Errorf("verifying %s: %w", app.Name, err)
 	}
 
-	if err := env.step(ctx, "Checking "+app.Name+" works", "", func(se *Env) error {
+	if err := env.step(ctx, "Checking "+app.Name+" works", "", func(ctx context.Context, se *Env) error {
 		return withTimeout(ctx, postcheckTimeout, "postcheck", func(ctx context.Context) error {
 			return postcheck(ctx, se, app, route, req.Host)
 		})
@@ -232,12 +237,32 @@ func precheck(ctx context.Context, env *Env, app App, method cluster.InstallMeth
 			return false, fmt.Errorf("%s needs %s, which is not installed; install it first: k8slocalcli app install %s", app.Name, dep.Name, dep.Name)
 		}
 	}
+	if err := requireNodeArch(cctx, env, app); err != nil {
+		return false, err
+	}
 	if app.preflight != nil {
 		if err := app.preflight(ctx, env); err != nil {
 			return false, err
 		}
 	}
 	return appInstalled(cctx, env, app), nil
+}
+
+// reapplyMethod is the method to re-apply an installed app with: the one it
+// was installed with, since another method would fight over the same
+// resources (Helm refuses to adopt what Argo CD or a manifest created, and
+// Argo CD/Flux would keep re-applying their copy). A method left to the
+// default follows the installation; one asked for that differs is an error.
+func reapplyMethod(ctx context.Context, env *Env, app App, req cluster.AppRequest) (cluster.InstallMethod, error) {
+	inst := DetectInstallation(ctx, env, app)
+	if inst.State != InstalledByUs || inst.Method == req.Method {
+		return req.Method, nil
+	}
+	if !req.MethodDefaulted {
+		return "", fmt.Errorf("%s is installed via %s, so it cannot be re-applied via %s: choose %s (%s:%s), or uninstall it first to switch",
+			app.Name, inst.Method, req.Method, inst.Method, app.Name, inst.Method)
+	}
+	return inst.Method, nil
 }
 
 // shouldReapply decides what to do with an app that is already installed.

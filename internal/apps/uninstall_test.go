@@ -42,7 +42,7 @@ func TestWithoutKinds(t *testing.T) {
 
 // The manifest-method patch must leave config.json valid JSON naming the dir.
 func TestLocalPathConfigPatch(t *testing.T) {
-	patch, err := localPathConfigPatch("/var/local-path-provisioner")
+	patch, err := localPathConfigPatch(localPathTalosDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,7 +60,74 @@ func TestLocalPathConfigPatch(t *testing.T) {
 	if err := json.Unmarshal([]byte(outer.Data["config.json"]), &cfg); err != nil {
 		t.Fatalf("config.json is not JSON: %v", err)
 	}
-	if len(cfg.NodePathMap) != 1 || cfg.NodePathMap[0].Paths[0] != "/var/local-path-provisioner" {
+	if len(cfg.NodePathMap) != 1 || cfg.NodePathMap[0].Paths[0] != localPathTalosDir {
 		t.Errorf("config = %+v", cfg)
+	}
+}
+
+func TestTrivyManifestPatches(t *testing.T) {
+	for _, talos := range []bool{false, true} {
+		patches, err := trivyManifestPatches(talos)
+		if err != nil {
+			t.Fatal(err)
+		}
+		data := func(configMap string) map[string]string {
+			var outer struct {
+				Data map[string]string `json:"data"`
+			}
+			if err := json.Unmarshal([]byte(patches[configMap]), &outer); err != nil {
+				t.Fatalf("%s patch is not JSON: %v\n%s", configMap, err, patches[configMap])
+			}
+			return outer.Data
+		}
+
+		var cfg struct {
+			Cache struct {
+				Backend string `json:"backend"`
+			} `json:"cache"`
+		}
+		if err := json.Unmarshal([]byte(data("trivy-operator-trivy-config")["trivy.configFile"]), &cfg); err != nil || cfg.Cache.Backend != "memory" {
+			t.Errorf("talos=%v: trivy.configFile cache = %+v (%v), want memory", talos, cfg, err)
+		}
+
+		operator := data("trivy-operator")
+		if !strings.Contains(operator["nodeCollector.tolerations"], "node-role.kubernetes.io/control-plane") {
+			t.Errorf("talos=%v: tolerations = %q", talos, operator["nodeCollector.tolerations"])
+		}
+		_, hasVolumes := operator["nodeCollector.volumes"]
+		if hasVolumes != talos {
+			t.Errorf("talos=%v: nodeCollector.volumes set = %v", talos, hasVolumes)
+		}
+		if !talos {
+			continue
+		}
+		var volumes []struct {
+			Name     string `json:"name"`
+			HostPath struct {
+				Path string `json:"path"`
+			} `json:"hostPath"`
+		}
+		if err := json.Unmarshal([]byte(operator["nodeCollector.volumes"]), &volumes); err != nil {
+			t.Fatalf("nodeCollector.volumes is not JSON: %v", err)
+		}
+		var mounts []struct {
+			Name      string `json:"name"`
+			MountPath string `json:"mountPath"`
+			ReadOnly  bool   `json:"readOnly"`
+		}
+		if err := json.Unmarshal([]byte(operator["nodeCollector.volumeMounts"]), &mounts); err != nil {
+			t.Fatalf("nodeCollector.volumeMounts is not JSON: %v", err)
+		}
+		if len(volumes) == 0 || len(volumes) != len(mounts) {
+			t.Fatalf("%d volumes, %d mounts", len(volumes), len(mounts))
+		}
+		for i, v := range volumes {
+			if v.HostPath.Path == "/etc/systemd" {
+				t.Errorf("volume %q mounts /etc/systemd, which Talos cannot create", v.Name)
+			}
+			if m := mounts[i]; m.Name != v.Name || m.MountPath != v.HostPath.Path || !m.ReadOnly {
+				t.Errorf("mount %+v does not match volume %+v", m, v)
+			}
+		}
 	}
 }

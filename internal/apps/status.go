@@ -3,6 +3,7 @@ package apps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -16,22 +17,65 @@ import (
 
 // step runs fn as one progress step. While it runs, the pods in namespace
 // (when given) are summarised on the live line, so a long helm --wait shows
-// what it is waiting for instead of nothing.
-func (e *Env) step(ctx context.Context, title, namespace string, fn func(se *Env) error) error {
+// what it is waiting for instead of nothing. fn gets the step's context.
+func (e *Env) step(ctx context.Context, title, namespace string, fn func(ctx context.Context, se *Env) error) error {
+	return e.runStep(ctx, title, namespace, false, fn)
+}
+
+// rolloutStep is step for waiting on pods to start (install, verify): it
+// also stops fn as soon as a pod's image can never be pulled, instead of
+// letting helm/Argo/Flux wait out the whole timeout. Only pods created during
+// the step count: on a re-install the broken pods of the previous attempt
+// stay until the fixed ones are ready. Not for uninstall, where a broken pod
+// on its way out must not stop the removal.
+func (e *Env) rolloutStep(ctx context.Context, title, namespace string, fn func(ctx context.Context, se *Env) error) error {
+	return e.runStep(ctx, title, namespace, true, fn)
+}
+
+func (e *Env) runStep(ctx context.Context, title, namespace string, failFast bool, fn func(ctx context.Context, se *Env) error) error {
 	rep := e.Progress
 	if rep == nil {
 		rep = progress.New(e.Out, false, 0)
 	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	var status progress.StatusFunc
 	if namespace != "" {
-		status = func(ctx context.Context) string { return e.podStatus(ctx, namespace) }
+		var older map[string]bool
+		if failFast {
+			older = map[string]bool{}
+			for _, name := range e.podStatus(ctx, namespace, nil).pods {
+				older[name] = true
+			}
+		}
+		last := "" // status is polled from one goroutine
+		status = func(sctx context.Context) string {
+			s := e.podStatus(sctx, namespace, older)
+			// Twice in a row, so one odd answer from a registry is not
+			// enough to give up.
+			if failFast && s.unpullable != "" && s.unpullable == last {
+				cancel(&unpullableError{s.unpullable})
+			}
+			last = s.unpullable
+			return s.text
+		}
 	}
-	return rep.Step(ctx, title, status, func(w io.Writer) error {
+	err := rep.Step(ctx, title, status, func(w io.Writer) error {
 		se := *e
 		se.Out = w
-		return fn(&se)
+		return fn(ctx, &se)
 	})
+	var unpullable *unpullableError
+	if err != nil && errors.As(context.Cause(ctx), &unpullable) {
+		return unpullable
+	}
+	return err
 }
+
+// unpullableError stops a rollout whose pods can never start.
+type unpullableError struct{ detail string }
+
+func (e *unpullableError) Error() string { return "stopped waiting: " + e.detail }
 
 // podList is the part of `kubectl get pods -o json` the status line needs.
 type podList struct {
@@ -48,7 +92,8 @@ type podList struct {
 }
 
 type containerStatus struct {
-	Ready bool `json:"ready"`
+	Ready bool   `json:"ready"`
+	Image string `json:"image"`
 	State struct {
 		Waiting *struct {
 			Reason  string `json:"reason"`
@@ -57,29 +102,40 @@ type containerStatus struct {
 	} `json:"state"`
 }
 
-func (e *Env) podStatus(ctx context.Context, namespace string) string {
+// podSummary is the status line for a namespace's pods. unpullable is set
+// when a pod not in older can never pull its image (see pullCause), e.g.
+// `grafana-…: image grafana/grafana:x cannot be pulled: …`. pods lists every
+// pod's name.
+type podSummary struct {
+	text, unpullable string
+	pods             []string
+}
+
+func (e *Env) podStatus(ctx context.Context, namespace string, older map[string]bool) podSummary {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	out, err := runner.New(nil).Capture(ctx, "kubectl", "--context", e.KubeContext,
 		"get", "pods", "-n", namespace, "-o", "json")
 	if err != nil {
-		return ""
+		return podSummary{}
 	}
-	return summarizePods([]byte(out))
+	return summarizePods([]byte(out), older)
 }
 
 // summarizePods turns a pod list into e.g.
-// "5/7 pods ready · argocd-redis-…: ImagePullBackOff". An image pull that
-// fails on certificate verification gets the corporate-proxy hint, since that
-// is by far the most common cause on a laptop.
-func summarizePods(data []byte) string {
+// "5/7 pods ready · argocd-redis-…: ImagePullBackOff". An image pull failure
+// is shown in preference to other problems: pods that depend on the missing
+// one often crash-loop and would hide it. Known pull failures get a hint.
+func summarizePods(data []byte, older map[string]bool) podSummary {
 	var pods podList
 	if err := json.Unmarshal(data, &pods); err != nil {
-		return ""
+		return podSummary{}
 	}
+	var sum podSummary
 	total, ready := 0, 0
-	problem := ""
+	problem, pullProblem := "", false
 	for _, p := range pods.Items {
+		sum.pods = append(sum.pods, p.Metadata.Name)
 		if p.Status.Phase == "Succeeded" {
 			continue // completed jobs
 		}
@@ -92,35 +148,59 @@ func summarizePods(data []byte) string {
 			ready++
 			continue
 		}
-		if problem != "" {
-			continue
-		}
 		for _, c := range append(p.Status.InitContainerStatuses, p.Status.ContainerStatuses...) {
-			if w := c.State.Waiting; w != nil && w.Reason != "" && w.Reason != "PodInitializing" {
-				problem = p.Metadata.Name + ": " + w.Reason
-				if isPullFailure(w.Reason) && isCertError(w.Message) {
-					problem += " (x509 — behind a TLS-intercepting proxy? put its root CA in ~/.k8slocalcli/ca-certificates and re-create the cluster)"
-				}
-				break
+			w := c.State.Waiting
+			if w == nil || w.Reason == "" || w.Reason == "PodInitializing" {
+				continue
 			}
+			if !isPullFailure(w.Reason) {
+				if problem == "" {
+					problem = p.Metadata.Name + ": " + w.Reason
+				}
+				continue
+			}
+			hint, permanent := pullCause(w.Message)
+			if !pullProblem {
+				problem, pullProblem = p.Metadata.Name+": "+w.Reason, true
+				if hint != "" {
+					problem += " (" + hint + ")"
+				}
+			}
+			if permanent && sum.unpullable == "" && !older[p.Metadata.Name] {
+				sum.unpullable = fmt.Sprintf("%s: image %s cannot be pulled: %s", p.Metadata.Name, c.Image, hint)
+			}
+			break
 		}
 	}
 	if total == 0 {
-		return "waiting for pods"
+		sum.text = "waiting for pods"
+		return sum
 	}
-	s := fmt.Sprintf("%d/%d pods ready", ready, total)
+	sum.text = fmt.Sprintf("%d/%d pods ready", ready, total)
 	if problem != "" {
-		s += " · " + problem
+		sum.text += " · " + problem
 	}
-	return s
+	return sum
 }
 
 func isPullFailure(reason string) bool {
 	return reason == "ErrImagePull" || reason == "ImagePullBackOff"
 }
 
-func isCertError(msg string) bool {
-	return strings.Contains(msg, "x509") || strings.Contains(msg, "certificate signed by unknown authority")
+// pullCause explains an image pull failure message: hint names a known cause
+// ("" if unknown), and permanent marks failures that kubelet's retries cannot
+// fix (unlike rate limits or network blips), so a rollout can stop early.
+func pullCause(msg string) (hint string, permanent bool) {
+	switch {
+	case strings.Contains(msg, "x509") || strings.Contains(msg, "certificate signed by unknown authority"):
+		return "x509 — behind a TLS-intercepting proxy? put its root CA in ~/.k8slocalcli/ca-certificates and re-create the cluster", true
+	// containerd reports this as NotFound too, so it goes first.
+	case strings.Contains(msg, "no match for platform in manifest"):
+		return "the image has no build for this node's CPU architecture — a newer k8slocalcli may pin a fixed version (k8slocalcli upgrade), or set another image tag with --values", true
+	case strings.Contains(msg, "code = NotFound") || strings.Contains(msg, "manifest unknown"):
+		return "the image or tag does not exist", true
+	}
+	return "", false
 }
 
 // checkHostResolves warns when host does not resolve to this machine. Some

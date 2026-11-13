@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,14 +22,14 @@ func TestParseRequest(t *testing.T) {
 		want    cluster.AppRequest
 		wantErr bool
 	}{
-		{"argocd", cluster.AppRequest{Name: "argocd", Method: cluster.MethodHelm, Host: "argocd.localtest.me"}, false},
+		{"argocd", cluster.AppRequest{Name: "argocd", Method: cluster.MethodHelm, MethodDefaulted: true, Host: "argocd.localtest.me"}, false},
 		{"argocd:manifest", cluster.AppRequest{Name: "argocd", Method: cluster.MethodManifest, Host: "argocd.localtest.me"}, false},
-		{"argocd=cd.localtest.me", cluster.AppRequest{Name: "argocd", Method: cluster.MethodHelm, Host: "cd.localtest.me"}, false},
+		{"argocd=cd.localtest.me", cluster.AppRequest{Name: "argocd", Method: cluster.MethodHelm, MethodDefaulted: true, Host: "cd.localtest.me"}, false},
 		{"argocd:manifest=cd.localtest.me", cluster.AppRequest{Name: "argocd", Method: cluster.MethodManifest, Host: "cd.localtest.me"}, false},
 		{"nope", cluster.AppRequest{}, true},
 		{"argocd:kustomize", cluster.AppRequest{}, true},
 		{"argocd:flux", cluster.AppRequest{}, true}, // the controllers cannot install themselves
-		{"prometheus", cluster.AppRequest{Name: "kube-prometheus-stack", Method: cluster.MethodHelm, Host: "grafana.localtest.me"}, false},
+		{"prometheus", cluster.AppRequest{Name: "kube-prometheus-stack", Method: cluster.MethodHelm, MethodDefaulted: true, Host: "grafana.localtest.me"}, false},
 		{"nyancat:argo", cluster.AppRequest{Name: "nyancat", Method: cluster.MethodArgo, Host: "nyancat.localtest.me"}, false},
 		{"valkey=v.localtest.me", cluster.AppRequest{}, true}, // nothing to expose
 		{"argocd=Bad_Host", cluster.AppRequest{}, true},
@@ -73,6 +74,13 @@ func TestCatalogEntries(t *testing.T) {
 		}
 		if a.Expose != nil && !cluster.IsLocalDomain(a.Expose.DefaultHost) {
 			t.Errorf("%s: default host %q is not a single label under localtest.me", a.Name, a.Expose.DefaultHost)
+		}
+		// Node architecture names as Kubernetes reports them (GOARCH); a typo
+		// such as x86_64 would make the precheck refuse every cluster.
+		for _, arch := range a.arches() {
+			if !slices.Contains([]string{"amd64", "arm64", "arm", "ppc64le", "s390x", "riscv64"}, arch) {
+				t.Errorf("%s: unknown architecture %q in Arches", a.Name, arch)
+			}
 		}
 	}
 }
@@ -221,6 +229,22 @@ func TestPlan(t *testing.T) {
 	}
 	if _, _, err := Plan([]cluster.AppRequest{{Name: "cnpg"}, {Name: "postgres"}}); err == nil {
 		t.Error("an app and its alias are the same request twice")
+	}
+
+	// Storage goes first (apps with volumes check for a default
+	// StorageClass), in catalog order; the rest keep the requested order.
+	plan, _, err = Plan([]cluster.AppRequest{
+		{Name: "kube-prometheus-stack"}, {Name: "nfs"}, {Name: "nyancat"}, {Name: "local-path"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	order = nil
+	for _, r := range plan {
+		order = append(order, r.Name)
+	}
+	if want := []string{"local-path", "nfs", "kube-prometheus-stack", "nyancat"}; !slices.Equal(order, want) {
+		t.Errorf("plan = %v, want %v", order, want)
 	}
 }
 

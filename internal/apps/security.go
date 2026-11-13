@@ -245,18 +245,160 @@ var trivyOperatorApp = App{
 		Version:   trivyChartVersion,
 		Namespace: trivyNamespace,
 	},
-	values: func(_ context.Context, env *Env, _ string) (map[string]any, error) {
-		values := map[string]any{}
+	values: func(ctx context.Context, env *Env, _ string) (map[string]any, error) {
+		trivy := map[string]any{"configFile": trivyConfigFile}
+		values := map[string]any{
+			"trivy":         trivy,
+			"nodeCollector": trivyNodeCollector(env.isTalos(ctx)),
+		}
 		if !env.production() {
 			// Gentle on a laptop: few concurrent scan jobs, and only
 			// vulnerabilities that have a fix.
 			values["operator"] = map[string]any{"scanJobsConcurrentLimit": 2}
-			values["trivy"] = map[string]any{"ignoreUnfixed": true}
+			trivy["ignoreUnfixed"] = true
 		}
 		return values, nil
 	},
 	manifestURL: "https://raw.githubusercontent.com/aquasecurity/trivy-operator/v" + trivyVersion + "/deploy/static/trivy-operator.yaml",
+	afterManifest: func(ctx context.Context, env *Env) error {
+		patches, err := trivyManifestPatches(env.isTalos(ctx))
+		if err != nil {
+			return err
+		}
+		for configMap, patch := range patches {
+			if err := env.kubectl(ctx, "patch", "configmap", configMap, "-n", trivyNamespace, "--type", "merge", "-p", patch); err != nil {
+				return err
+			}
+		}
+		return nil
+	},
+	configure: trivyRestartStaleOperator,
 	notes: func(_ context.Context, env *Env, _ string) {
 		fmt.Fprintf(env.Out, "   Reports:  kubectl --context %s get vulnerabilityreports,configauditreports -A  (scans take a few minutes)\n", env.KubeContext)
 	},
+}
+
+// trivyRestartStaleOperator restarts an operator that started before the
+// trivy-operator ConfigMap was last written: it reads that ConfigMap
+// (node-collector tolerations and volumes among it) only at startup, and
+// neither a chart upgrade nor afterManifest's patch restarts it, so a
+// re-install would keep the old settings. trivy-operator-trivy-config is
+// read per scan job and needs no restart.
+func trivyRestartStaleOperator(ctx context.Context, env *Env) error {
+	written, err := env.kubectlQuiet(ctx, "get", "configmap", "trivy-operator", "-n", trivyNamespace,
+		"-o", "jsonpath={.metadata.managedFields[*].time}")
+	if err != nil {
+		return nil
+	}
+	starts, err := env.kubectlQuiet(ctx, "get", "pods", "-n", trivyNamespace, "-l", "app.kubernetes.io/name=trivy-operator",
+		"-o", "jsonpath={.items[*].status.startTime}")
+	if err != nil || !startedBefore(strings.Fields(starts), latestTime(strings.Fields(written))) {
+		return nil
+	}
+	fmt.Fprintf(env.Out, "ℹ️  Restarting the Trivy Operator: it started before its configuration changed and reads it only at startup\n")
+	if err := env.kubectl(ctx, "rollout", "restart", "deployment/trivy-operator", "-n", trivyNamespace); err != nil {
+		return err
+	}
+	return env.kubectl(ctx, "rollout", "status", "deployment/trivy-operator", "-n", trivyNamespace, "--timeout=5m")
+}
+
+// latestTime returns the latest of RFC 3339 UTC timestamps (as the API
+// server writes them, they sort as strings), or "" for none.
+func latestTime(times []string) string {
+	latest := ""
+	for _, t := range times {
+		latest = max(latest, t)
+	}
+	return latest
+}
+
+// trivyConfigFile is Trivy's own config file for every scan container. A
+// vulnerability scan job runs one Trivy container per container of the
+// workload, all at once, on one shared --cache-dir; with the default bbolt
+// "fs" cache all but one time out on its lock ("cache may be in use by
+// another process") and the job fails, so multi-container workloads never get
+// a report. The memory cache is per process (the vulnerability DB is opened
+// read-only and still shared).
+var trivyConfigFile = map[string]any{"cache": map[string]any{"backend": "memory"}}
+
+// trivyNodeCollector is the chart's nodeCollector values. node-collector
+// reports on every node, but its jobs have no tolerations by default, so the
+// one pinned to a tainted control plane stays Pending until it times out.
+// On Talos the hostPaths change too (trivyTalosHostPaths).
+func trivyNodeCollector(talos bool) map[string]any {
+	values := map[string]any{"tolerations": []any{map[string]any{
+		"key":      "node-role.kubernetes.io/control-plane",
+		"operator": "Exists",
+		"effect":   "NoSchedule",
+	}}}
+	if talos {
+		values["volumes"] = trivyTalosVolumes()
+		values["volumeMounts"] = trivyTalosVolumeMounts()
+	}
+	return values
+}
+
+// trivyManifestPatches are merge patches (by ConfigMap name) that give a
+// manifest install what the chart renders from trivyNodeCollector and
+// trivyConfigFile: "nodeCollector.<key>" as JSON in trivy-operator, and the
+// config file in trivy-operator-trivy-config (JSON is valid YAML).
+func trivyManifestPatches(talos bool) (map[string]string, error) {
+	data := map[string]map[string]string{
+		"trivy-operator":              {},
+		"trivy-operator-trivy-config": {},
+	}
+	for key, value := range trivyNodeCollector(talos) {
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		data["trivy-operator"]["nodeCollector."+key] = string(encoded)
+	}
+	configFile, err := json.Marshal(trivyConfigFile)
+	if err != nil {
+		return nil, err
+	}
+	data["trivy-operator-trivy-config"]["trivy.configFile"] = string(configFile)
+
+	patches := map[string]string{}
+	for configMap, d := range data {
+		patch, err := json.Marshal(map[string]any{"data": d})
+		if err != nil {
+			return nil, err
+		}
+		patches[configMap] = string(patch)
+	}
+	return patches, nil
+}
+
+// trivyTalosHostPaths are the host paths node-collector reads on Talos: the
+// chart's defaults (volume name → path, in chart order) without
+// /etc/systemd. Talos has no such directory and /etc is read-only, so
+// containerd's mkdir for the hostPath fails and every node-collector job
+// stays in CreateContainerError. The missing /var/lib/* paths are fine: /var
+// is writable.
+var trivyTalosHostPaths = [][2]string{
+	{"var-lib-etcd", "/var/lib/etcd"},
+	{"var-lib-kubelet", "/var/lib/kubelet"},
+	{"var-lib-kube-scheduler", "/var/lib/kube-scheduler"},
+	{"var-lib-kube-controller-manager", "/var/lib/kube-controller-manager"},
+	{"lib-systemd", "/lib/systemd"},
+	{"etc-kubernetes", "/etc/kubernetes"},
+	{"etc-cni-netd", "/etc/cni/net.d"},
+}
+
+func trivyTalosVolumes() []any {
+	volumes := make([]any, 0, len(trivyTalosHostPaths))
+	for _, p := range trivyTalosHostPaths {
+		volumes = append(volumes, map[string]any{"name": p[0], "hostPath": map[string]any{"path": p[1]}})
+	}
+	return volumes
+}
+
+func trivyTalosVolumeMounts() []any {
+	mounts := make([]any, 0, len(trivyTalosHostPaths))
+	for _, p := range trivyTalosHostPaths {
+		mounts = append(mounts, map[string]any{"name": p[0], "mountPath": p[1], "readOnly": true})
+	}
+	return mounts
 }

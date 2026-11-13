@@ -93,9 +93,14 @@ func localPathConfigPatch(dir string) (string, error) {
 }
 
 // localPathTalosDir is where volumes go on Talos, whose root filesystem
-// (and so the default /opt/local-path-provisioner) is read-only; /var is the
-// writable state partition (Talos' own local-path guide uses this path).
-const localPathTalosDir = "/var/local-path-provisioner"
+// (and so the default /opt/local-path-provisioner) is read-only. It must be
+// under /var/lib/kubelet: Talos runs kubelet in a container that shares only
+// that part of /var (rshared, rw), and kubelet resolves subPath mounts in its
+// own view. Elsewhere (e.g. /var/local-path-provisioner, Talos' older guide,
+// which needs kubelet extraMounts that the 1.14 KubeletConfig document no
+// longer has) kubelet creates the subPath inside its own root filesystem, so
+// Prometheus gets a root-owned directory that is not on the volume.
+const localPathTalosDir = "/var/lib/kubelet/local-path-provisioner"
 
 var localPathManifestURL = "https://raw.githubusercontent.com/rancher/local-path-provisioner/v" + localPathVersion + "/deploy/local-path-storage.yaml"
 

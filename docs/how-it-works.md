@@ -118,10 +118,18 @@ Every catalog app (`internal/apps`) runs through the same steps
 | Step | Timeout | What |
 |------|---------|------|
 | connect | 20s | the kube context exists and `/readyz` (or `/version`) answers |
-| precheck | 1m | helm on PATH, Flux/Argo CD CRDs for the gitops methods, dependencies, app preflight (default StorageClass, Longhorn on container nodes), already installed? |
+| precheck | 1m | helm on PATH, Flux/Argo CD CRDs for the gitops methods, dependencies, the nodes' CPU architecture has the app's images, app preflight (default StorageClass, Longhorn on container nodes), already installed? |
 | install | 10m (15m for Longhorn, Keycloak, kube-prometheus-stack) | app `prepare` (Secrets, databases), then helm `--wait` / manifest / Flux HelmRelease Ready / Argo CD Synced+Healthy |
 | verify | 5m | `rollout status` for every Deployment, StatefulSet and DaemonSet in the app namespace (or the app's `Workloads`) |
 | postcheck | 5m | app `configure` (MetalLB pool, postgres cluster), CRD Established, app `check`, route |
+
+While install and verify run, the live status line summarises the app's pods.
+When a new pod's image can never be pulled — no build for the node's CPU
+architecture, a tag that does not exist, or a certificate error behind a
+TLS-intercepting proxy — the step stops at once and names the image and the
+cause, instead of waiting out its timeout. Retryable pull errors (rate limits,
+network blips) are left to kubelet. Every pinned image is checked for amd64
+and arm64 builds before a version bump ships (`TestImageArchAudit`).
 
 An app describes only what is specific to it: a chart (which gives it the
 helm, flux and argo methods; values are a map so all three use the same

@@ -189,6 +189,10 @@ func (e Exposure) Validate() error {
 type AppRequest struct {
 	Name   string
 	Method InstallMethod
+	// MethodDefaulted marks a Method filled in with the app's default rather
+	// than asked for; re-applying an installed app then keeps the method it
+	// was installed with.
+	MethodDefaulted bool
 	// Host is the hostname the app is exposed on through the gateway, e.g.
 	// argocd.localtest.me. Empty means the app's default; ignored when exposure
 	// is off or the app has nothing to expose.

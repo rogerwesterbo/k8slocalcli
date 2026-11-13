@@ -51,7 +51,10 @@ Understanding these four seams is enough to be productive:
   invoke `kind`/`talosctl`/`kubectl`/`docker`. All subprocess launches funnel
   through `Runner.run`, which carries a justified `#nosec G204` (the command name
   is always a hardcoded tool; args are pre-validated). Add provider commands by
-  calling `runner.New(out).Run/Capture`, not `os/exec` directly.
+  calling `runner.New(out).Run/Capture`, not `os/exec` directly. A cancelled
+  command gets an interrupt and is killed only after `cancelGrace`: helm marks
+  an interrupted release `failed` (upgradable), a killed one stays
+  `pending-install` and blocks every later upgrade.
 
 - **`internal/tui`** — `termui/v3` forms: `form.go` (create, custom
   two-column layout), `appinstall.go` and `appuninstall.go` (both a
@@ -98,6 +101,32 @@ Understanding these four seams is enough to be productive:
   (`helm show chart`); k8sdockside/nyancat are deliberately unpinned. Notes
   read live state, never `env.Profile` (`info` does not know the profile).
   User `--values` are deep-merged over app values, so values stay plain maps.
+  Re-applying a GitOps object must not trust its status until the controller
+  has seen the new spec: the Argo Application carries
+  `argocd.argoproj.io/refresh`, which the controller removes in the same patch
+  as the status of that comparison (`argoInstall` waits for it to go), and
+  Flux waits for `status.lastHandledReconcileAt` = our `requestedAt`. A sync
+  Argo is still running from an abandoned attempt blocks every new one, so
+  `terminateArgoSync` marks it `Terminating` first (= `argocd app terminate-op`).
+  Operators that check their CRDs once at startup (Prometheus Operator) get
+  them from k8slocalcli in `prepare`, Established before the chart starts the
+  operator, with the chart's own CRDs off (`kpsInstallCRDs`): via Argo CD the
+  big `prometheuses` CRD was established 6 min late on a busy Talos control
+  plane, the operator disabled its Prometheus controller, and the sync waited
+  forever on the Prometheus resource. Taking CRDs over from an Argo CD install
+  means removing `argocd.argoproj.io/tracking-id` from them, or prune deletes
+  them (and every custom resource) once the chart stops rendering them.
+  Likewise Trivy Operator reads its `trivy-operator` ConfigMap only at
+  startup and the chart's `checksum/config` does not cover it, so `configure`
+  restarts an operator older than that ConfigMap's last write
+  (`trivyRestartStaleOperator`). Its scan jobs run one Trivy per workload
+  container in parallel on one cache dir; `trivyConfigFile` sets the memory
+  cache backend, or all but one fail on the bbolt lock.
+  Re-applying an installed app keeps the method it was installed with
+  (`reapplyMethod`, via `DetectInstallation`) when none was given
+  (`AppRequest.MethodDefaulted`), and refuses a different explicit one: Helm
+  cannot adopt what Argo CD rendered, and the `managed-by=Helm` label is on
+  those too, so `helmManaged` checks Helm's `meta.helm.sh/release-name`.
   Uninstall finds the method live; manifest installs are only recognised by the
   `k8slocalcli.io/installed-by=manifest` label. Never delete CRDs or protected
   namespaces. Verify new apps on **both** kind and Talos (see the Talos Pod
@@ -105,7 +134,15 @@ Understanding these four seams is enough to be productive:
   opt-in `TestPodSecurityAudit` (`podsecurity_audit_test.go`) against a
   throwaway cluster: it fails when an app's rendered workloads break Pod
   Security baseline but the app is not `Privileged`. Pods an app creates at
-  runtime are not rendered, so judge those yourself (local-path, Trivy). Adding a gateway controller = implement
+  runtime are not rendered, so judge those yourself (local-path, Trivy). Also
+  run the opt-in `TestImageArchAudit` (`imagearch_audit_test.go`,
+  `K8SLOCALCLI_IMAGE_AUDIT=1` or `=<app>,…`; needs helm + docker, no cluster):
+  it checks every rendered/manifest image (incl. operator flags like
+  `--prometheus-config-reloader=`) has a build for each of the app's
+  `Arches` (default amd64 + arm64) — Prometheus Operator v0.95.1 shipped an
+  amd64-only index and broke every Apple Silicon install. An app whose images
+  genuinely lack an architecture sets `Arches`; the precheck
+  (`requireNodeArch`) then refuses clusters with no such node. Adding a gateway controller = implement
   `GatewayController` (contract in `gateway.go`), add it to `controllers` and
   `cluster.GatewayControllers`.
 
@@ -117,8 +154,16 @@ Understanding these four seams is enough to be productive:
 - **`internal/progress`** — `Reporter.Step` runs a long step: on a terminal a
   single redrawn line (spinner · elapsed · status) with command output held
   back; otherwise (CI, pipes, `--verbose`) plain streamed output plus status
-  lines. `apps.Env.step` wires it to a live pod summary (`summarizePods`, which
-  adds the corporate-CA hint on x509 pull errors). Terminal detection uses the
+  lines. `apps.Env.step` wires it to a live pod summary (`summarizePods`: an
+  image pull failure wins over other problems, and `pullCause` explains known
+  causes — x509 behind the corporate proxy, no build for the node's CPU
+  architecture, missing tag). `rolloutStep` (install/verify, never uninstall)
+  additionally cancels the step when a pod created during it shows the same
+  *permanent* pull failure on two polls, so a broken image fails in seconds,
+  not after the 10–15m install timeout. Pods that existed before the step are
+  ignored: on a re-install the previous attempt's broken pods linger until the
+  fixed ones are ready. Step closures must use the `ctx` they are given, or
+  the cancel never reaches them. Terminal detection uses the
   window size, not `ModeCharDevice` (`/dev/null` is a char device). Anything
   that prompts must run outside a step, or the prompt is hidden.
 
@@ -172,6 +217,13 @@ Understanding these four seams is enough to be productive:
 - **Talos Docker backend = single control plane.** `talosctl cluster create
   docker` ignores `--controlplanes`; the talos provider warns and creates one if
   more are requested. Talos state lives in `~/.k8slocalcli/clusters`.
+- **talosctl 1.14 `cluster destroy` wipes its whole `--state` dir** (Docker
+  `Reflect` uses `--state` itself as the cluster's state path), i.e. every
+  other Talos cluster's state too. `Delete` therefore moves `clusters/<name>`
+  into a temp dir (`isolateState`) and destroys with `--state` = that dir.
+  Never pass the shared dir to `cluster destroy`. Clusters are found via
+  Docker (`List`), so a cluster whose state is gone still deletes (destroy
+  fails, manual container/network cleanup does the work).
 - **Host exposure** (`Spec.Exposure`, default on): kind `extraPortMappings` /
   talos `--exposed-ports` publish `HTTPPort`/`HTTPSPort` to the fixed NodePorts
   `cluster.GatewayHTTPNodePort`/`GatewayHTTPSNodePort` (30080/30443) on the
@@ -242,8 +294,17 @@ Understanding these four seams is enough to be productive:
   on kind can still fail on Talos. Apps needing hostPath, host network or extra
   capabilities set `privileged: true` (namespace labelled
   `pod-security.kubernetes.io/enforce=privileged` before install). `/opt` is
-  read-only on Talos, so local-path uses `/var/local-path-provisioner` there
-  (`isTalos` checks the nodes' osImage, so `--context` Talos clusters too).
+  read-only on Talos, so local-path uses `/var/lib/kubelet/local-path-provisioner`
+  there (`isTalos` checks the nodes' osImage, so `--context` Talos clusters
+  too). It must be under `/var/lib/kubelet`: Talos' kubelet runs in a container
+  that sees only that part of `/var`, resolves `subPath` mounts in its own view,
+  and for any other hostPath silently creates the subPath in its own rootfs
+  (Prometheus: `permission denied`, data not on the PV). Kubelet `extraMounts`
+  can't fix it on 1.14 (the `KubeletConfig` doc has none). `storageSmokeTest`
+  writes through a subPath to catch this. `/etc` is read-only too, so
+  Trivy's node-collector gets the chart's hostPaths minus `/etc/systemd`
+  (`trivyTalosHostPaths`): Talos has no such dir and containerd's mkdir for
+  it leaves every node-collector job in `CreateContainerError`.
 - **Zero workers**: `makeControlPlaneSchedulable` (`schedule.go`) removes the
   control-plane `NoSchedule` taint so a control-plane-only cluster can run pods.
 - **Version selection**: an empty `Spec.K8sVersion` means "provider's newest" —

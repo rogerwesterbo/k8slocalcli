@@ -2,6 +2,7 @@ package apps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -37,11 +38,25 @@ func (e *Env) fluxInstall(ctx context.Context, name string, c helmChart, timeout
 	if err := e.applyYAML(ctx, manifest); err != nil {
 		return fmt.Errorf("creating Flux HelmRelease: %w", err)
 	}
-	// Ask for a reconcile now instead of waiting for the next interval.
-	_ = e.kubectl(ctx, "annotate", "--overwrite", "-n", fluxNamespace, "helmrelease/"+name,
-		"reconcile.fluxcd.io/requestedAt="+time.Now().Format(time.RFC3339Nano))
-	return e.kubectl(ctx, "wait", "--for=condition=Ready", "helmrelease/"+name,
-		"-n", fluxNamespace, "--timeout="+timeout.String())
+	// Ask for a reconcile now instead of waiting for the next interval, and
+	// wait until the controller reports having handled that request: before
+	// then, Ready may still be the previous version's (on a re-apply).
+	requested := time.Now().Format(time.RFC3339Nano)
+	if err := e.kubectl(ctx, "annotate", "--overwrite", "-n", fluxNamespace, "helmrelease/"+name,
+		"reconcile.fluxcd.io/requestedAt="+requested); err != nil {
+		return err
+	}
+	deadline := time.Now().Add(timeout)
+	for _, cond := range []string{"--for=jsonpath={.status.lastHandledReconcileAt}=" + requested, "--for=condition=Ready"} {
+		left := time.Until(deadline).Round(time.Second)
+		if left <= 0 {
+			left = time.Second
+		}
+		if err := e.kubectl(ctx, "wait", cond, "helmrelease/"+name, "-n", fluxNamespace, "--timeout="+left.String()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // fluxManifest renders the Flux source and HelmRelease for a chart.
@@ -122,15 +137,33 @@ func fluxManifest(name string, c helmChart, timeout time.Duration) (string, erro
 // argocd namespace (plus a repository Secret for OCI charts, which Argo CD
 // cannot pull without one). It waits (up to timeout) for the Application to
 // be Synced and Healthy.
+//
+// The Application carries Argo CD's refresh annotation, which the controller
+// removes in the same patch that writes the status of comparing that very
+// object. Waiting for it to go first matters on a re-apply: until then the
+// status is the previous version's, and Synced/Healthy would pass at once.
 func (e *Env) argoInstall(ctx context.Context, name string, c helmChart, timeout time.Duration) error {
 	manifest, err := argoManifest(name, c)
 	if err != nil {
+		return err
+	}
+	if err := e.terminateArgoSync(ctx, name); err != nil {
 		return err
 	}
 	if err := e.applyYAML(ctx, manifest); err != nil {
 		return fmt.Errorf("creating Argo CD Application: %w", err)
 	}
 	deadline := time.Now().Add(timeout)
+	if err := retry(ctx, time.Until(deadline), 2*time.Second, func(ctx context.Context) error {
+		refresh, err := e.kubectlQuiet(ctx, "get", "application", name, "-n", argoCDNamespace,
+			"-o", `jsonpath={.metadata.annotations.argocd\.argoproj\.io/refresh}`)
+		if err == nil && strings.TrimSpace(refresh) != "" {
+			err = errors.New("waiting for Argo CD to compare the new Application")
+		}
+		return err
+	}); err != nil {
+		return err
+	}
 	for _, cond := range []string{"{.status.sync.status}=Synced", "{.status.health.status}=Healthy"} {
 		left := time.Until(deadline).Round(time.Second)
 		if left <= 0 {
@@ -138,8 +171,42 @@ func (e *Env) argoInstall(ctx context.Context, name string, c helmChart, timeout
 		}
 		if err := e.kubectl(ctx, "wait", "--for=jsonpath="+cond, "application/"+name,
 			"-n", argoCDNamespace, "--timeout="+left.String()); err != nil {
-			return err
+			return e.withArgoStatus(name, err)
 		}
+	}
+	return nil
+}
+
+// withArgoStatus adds what Argo CD itself reports as blocking the
+// Application to err: the pods can all be ready while Argo CD still waits,
+// e.g. "waiting for healthy state of monitoring.coreos.com/Prometheus/…".
+func (e *Env) withArgoStatus(name string, err error) error {
+	// Own short context: the caller's may be the one that just timed out.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	out, qerr := e.kubectlQuiet(ctx, "get", "application", name, "-n", argoCDNamespace, "-o",
+		"jsonpath=sync {.status.sync.status}, health {.status.health.status}: {.status.operationState.message}")
+	if qerr != nil || strings.TrimSpace(out) == "" {
+		return err
+	}
+	return fmt.Errorf("%w\n  Argo CD: %s", err, strings.TrimSpace(out))
+}
+
+// terminateArgoSync stops a sync of Application name that is still running,
+// as `argocd app terminate-op` does. A sync of a broken revision (an image
+// that never pulls) keeps waiting for health after k8slocalcli has given up
+// (failed fast, timed out, Ctrl-C), and Argo CD starts no new sync — not even
+// for the corrected Application — until it ends.
+func (e *Env) terminateArgoSync(ctx context.Context, name string) error {
+	phase, err := e.kubectlQuiet(ctx, "get", "application", name, "-n", argoCDNamespace,
+		"-o", "jsonpath={.status.operationState.phase}")
+	if err != nil || strings.TrimSpace(phase) != "Running" {
+		return nil // not installed yet, or nothing in progress
+	}
+	fmt.Fprintf(e.Out, "ℹ️  Stopping the unfinished Argo CD sync of %s from an earlier attempt\n", name)
+	if _, err := e.kubectlQuiet(ctx, "patch", "application", name, "-n", argoCDNamespace,
+		"--type", "merge", "-p", `{"status":{"operationState":{"phase":"Terminating"}}}`); err != nil {
+		return fmt.Errorf("stopping the running Argo CD sync of %s: %w", name, err)
 	}
 	return nil
 }
@@ -179,10 +246,13 @@ func argoManifest(name string, c helmChart) (string, error) {
 		"apiVersion": "argoproj.io/v1alpha1",
 		"kind":       "Application",
 		"metadata": map[string]any{
-			"name":       name,
-			"namespace":  argoCDNamespace,
-			"labels":     map[string]any{"app.kubernetes.io/managed-by": "k8slocalcli"},
-			"finalizers": []any{"resources-finalizer.argocd.argoproj.io"},
+			"name":      name,
+			"namespace": argoCDNamespace,
+			"labels":    map[string]any{"app.kubernetes.io/managed-by": "k8slocalcli"},
+			// Consumed by the controller once it has compared this
+			// version (see argoInstall).
+			"annotations": map[string]any{"argocd.argoproj.io/refresh": "normal"},
+			"finalizers":  []any{"resources-finalizer.argocd.argoproj.io"},
 		},
 		"spec": map[string]any{
 			"project": "default",

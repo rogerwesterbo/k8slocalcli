@@ -2,8 +2,10 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -472,8 +474,13 @@ func (t *Talos) Delete(ctx context.Context, name string, out io.Writer) error {
 	}
 
 	fmt.Fprintf(out, "\n⏰ Deleting Talos cluster %q\n", name)
-	if err := r.Run(ctx, "talosctl", "cluster", "destroy", "--name", name, "--state", state); err != nil {
-		fmt.Fprintf(out, "⚠️  talosctl destroy failed, attempting manual cleanup: %v\n", err)
+	if iso, cleanup, err := isolateState(state, name); err != nil {
+		fmt.Fprintf(out, "⚠️  skipping talosctl destroy, attempting manual cleanup: %v\n", err)
+	} else {
+		if err := r.Run(ctx, "talosctl", "cluster", "destroy", "--name", name, "--state", iso); err != nil {
+			fmt.Fprintf(out, "⚠️  talosctl destroy failed, attempting manual cleanup: %v\n", err)
+		}
+		cleanup()
 	}
 
 	// Best-effort cleanup of any leftover containers/network for this cluster.
@@ -488,6 +495,26 @@ func (t *Talos) Delete(ctx context.Context, name string, out io.Writer) error {
 
 	fmt.Fprintf(out, "\n✅ Talos cluster %q deleted\n", name)
 	return nil
+}
+
+// isolateState moves cluster name's state directory into a fresh directory
+// under state and returns that directory, for `talosctl cluster destroy
+// --state`. talosctl 1.14's Docker Destroy removes the whole --state directory
+// (Reflect takes it as the cluster's own path), which would wipe every other
+// cluster's state. cleanup removes the isolated directory. A missing state
+// directory is not an error: destroy then fails on its own and Delete falls
+// back to manual cleanup.
+func isolateState(state, name string) (dir string, cleanup func(), err error) {
+	dir, err = os.MkdirTemp(state, ".destroy-"+name+"-")
+	if err != nil {
+		return "", nil, err
+	}
+	cleanup = func() { _ = os.RemoveAll(dir) }
+	if err := os.Rename(filepath.Join(state, name), filepath.Join(dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		cleanup()
+		return "", nil, err
+	}
+	return dir, cleanup, nil
 }
 
 // Leftovers implements LeftoverChecker. It reports what a previous (usually

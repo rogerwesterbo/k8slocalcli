@@ -257,7 +257,7 @@ func Uninstall(ctx context.Context, env *Env, app App, inst Installation, opts U
 	}
 
 	title := fmt.Sprintf("Removing %s (installed via %s)", app.Name, inst.Method)
-	if err := env.step(ctx, title, app.Namespace, func(se *Env) error {
+	if err := env.step(ctx, title, app.Namespace, func(ctx context.Context, se *Env) error {
 		return withTimeout(ctx, removeTimeout, "remove", func(ctx context.Context) error {
 			if app.beforeRemove != nil {
 				if err := app.beforeRemove(ctx, se); err != nil {
@@ -276,7 +276,7 @@ func Uninstall(ctx context.Context, env *Env, app App, inst Installation, opts U
 		return fmt.Errorf("removing %s: %w", app.Name, err)
 	}
 
-	if err := env.step(ctx, "Checking "+app.Name+" is gone", app.Namespace, func(se *Env) error {
+	if err := env.step(ctx, "Checking "+app.Name+" is gone", app.Namespace, func(ctx context.Context, se *Env) error {
 		return withTimeout(ctx, goneTimeout, "waiting for removal", func(ctx context.Context) error {
 			return retry(ctx, goneTimeout, 3*time.Second, func(ctx context.Context) error {
 				if appInstalled(ctx, se, app) {
@@ -314,7 +314,7 @@ func (e *Env) purgeNamespace(ctx context.Context, ns string, purge bool) (kept [
 	if !purge {
 		return []string{ns}, nil
 	}
-	return nil, e.step(ctx, "Deleting namespace "+ns+" and its volumes", "", func(se *Env) error {
+	return nil, e.step(ctx, "Deleting namespace "+ns+" and its volumes", "", func(ctx context.Context, se *Env) error {
 		return withTimeout(ctx, namespaceTimeout, "namespace deletion", func(ctx context.Context) error {
 			return se.kubectl(ctx, "delete", "namespace", ns, "--wait=true", "--timeout="+remaining(ctx, namespaceTimeout).String())
 		})
