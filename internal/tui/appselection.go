@@ -28,6 +28,11 @@ type appSelection struct {
 	// method is the Method field: one install method for every selected app
 	// that supports it, or "" for each app's own (chosen in the checklist).
 	method cluster.InstallMethod
+	// provided returns the apps the cluster setup installs by itself (create
+	// only: cert-manager for verified HTTPS). They show as ticked and locked
+	// and are left out of the requests; a tick the user gave one is kept, so
+	// it comes back when the setting that provides it is turned off.
+	provided func() []apps.ExposureApp
 }
 
 // methodChoices are the Method field's values: each app's own, then every
@@ -63,11 +68,34 @@ func newAppSelection(initial []cluster.AppRequest, installed map[string]bool) ap
 	return s
 }
 
+// providedApp reports whether the cluster setup installs app by itself.
+func (s *appSelection) providedApp(name string) (apps.ExposureApp, bool) {
+	if s.provided == nil {
+		return apps.ExposureApp{}, false
+	}
+	for _, p := range s.provided() {
+		if p.Name == name {
+			return p, true
+		}
+	}
+	return apps.ExposureApp{}, false
+}
+
+// chosen reports whether catalog[i] is selected by the user and not
+// installed by the cluster setup anyway.
+func (s *appSelection) chosen(i int) bool {
+	if s.appChoice[i] == 0 {
+		return false
+	}
+	_, provided := s.providedApp(s.catalog[i].Name)
+	return !provided
+}
+
 // requests returns the selected apps; hostnames only when routes are possible.
 func (s *appSelection) requests(withHosts bool) []cluster.AppRequest {
 	var out []cluster.AppRequest
 	for i, a := range s.catalog {
-		if s.appChoice[i] == 0 {
+		if !s.chosen(i) {
 			continue
 		}
 		req := cluster.AppRequest{Name: a.Name, Method: a.Methods[s.appChoice[i]-1]}
@@ -139,7 +167,7 @@ func (s *appSelection) applyMethod() {
 		return
 	}
 	for i, a := range s.catalog {
-		if s.appChoice[i] == 0 {
+		if !s.chosen(i) {
 			continue
 		}
 		if j := slices.Index(a.Methods, s.method); j >= 0 {
@@ -159,7 +187,7 @@ func (s *appSelection) syncMethod() {
 func (s *appSelection) commonMethod() cluster.InstallMethod {
 	var common cluster.InstallMethod
 	for i, a := range s.catalog {
-		if s.appChoice[i] == 0 {
+		if !s.chosen(i) {
 			continue
 		}
 		m := a.Methods[s.appChoice[i]-1]
@@ -197,7 +225,7 @@ func (s *appSelection) methodNote() string {
 	}
 	var keep []string
 	for i, a := range s.catalog {
-		if s.appChoice[i] > 0 && !slices.Contains(a.Methods, s.method) {
+		if s.chosen(i) && !slices.Contains(a.Methods, s.method) {
 			keep = append(keep, fmt.Sprintf("%s (keeps %s)", a.Name, a.Methods[s.appChoice[i]-1]))
 		}
 	}
@@ -230,8 +258,8 @@ func (s *appSelection) presetText(focused bool) string {
 
 func (s *appSelection) selectedCount() int {
 	n := 0
-	for _, c := range s.appChoice {
-		if c > 0 {
+	for i := range s.catalog {
+		if s.chosen(i) {
 			n++
 		}
 	}
@@ -239,24 +267,28 @@ func (s *appSelection) selectedCount() int {
 }
 
 // matchingPreset returns the preset index whose apps are exactly the current
-// selection, or 0 ("custom").
+// selection, or 0 ("custom"). Apps the cluster setup provides count as
+// selected when the preset has them, and are not missing when it does not.
 func (s *appSelection) matchingPreset() int {
-	selected := map[string]bool{}
+	chosen := map[string]bool{}
 	for i, a := range s.catalog {
-		if s.appChoice[i] > 0 {
-			selected[a.Name] = true
+		if s.chosen(i) {
+			chosen[a.Name] = true
 		}
 	}
-	if len(selected) == 0 {
+	if len(chosen) == 0 {
 		return 0
 	}
 	for i, p := range apps.Presets() {
-		if len(p.Apps) != len(selected) {
-			continue
-		}
+		inPreset := map[string]bool{}
 		all := true
 		for _, a := range p.Apps {
-			all = all && selected[a]
+			inPreset[a] = true
+			_, provided := s.providedApp(a)
+			all = all && (chosen[a] || provided)
+		}
+		for a := range chosen {
+			all = all && inPreset[a]
 		}
 		if all {
 			return i + 1
@@ -268,46 +300,120 @@ func (s *appSelection) matchingPreset() int {
 // appsText summarises the selection on the Apps field with each app's
 // method: "4 via helm: a, b, …" when they share one, "a (helm), b (flux)"
 // otherwise.
+//
+// Apps installed without being selected follow: "+ cert-manager (verified
+// HTTPS), argocd (for nyancat)", so the field shows everything that will be
+// installed.
 func (s *appSelection) appsText(focused bool) string {
 	var names []string
 	for i, a := range s.catalog {
-		if s.appChoice[i] > 0 {
+		if s.chosen(i) {
 			names = append(names, a.Name)
 		}
 	}
-	if m := s.commonMethod(); m != "" {
-		return strings.Replace(selectionText(names, focused), ": ", " via "+string(m)+": ", 1)
-	}
-	for k, n := range names {
-		for i, a := range s.catalog {
-			if a.Name == n {
-				names[k] = fmt.Sprintf("%s (%s)", n, a.Methods[s.appChoice[i]-1])
+	common := s.commonMethod()
+	if common == "" {
+		for k, n := range names {
+			for i, a := range s.catalog {
+				if a.Name == n {
+					names[k] = fmt.Sprintf("%s (%s)", n, a.Methods[s.appChoice[i]-1])
+				}
 			}
 		}
 	}
-	return selectionText(names, focused)
+	text := selectionText(names, false)
+	if common != "" {
+		text = strings.Replace(text, ": ", " via "+string(common)+": ", 1)
+	}
+	if extra := s.alsoInstalled(); len(extra) > 0 {
+		text += " + " + strings.Join(extra, ", ")
+	}
+	if focused {
+		text += chooseHint
+	}
+	return text
+}
+
+// alsoInstalled lists, in catalog order, the apps installed without being
+// selected, with why: "cert-manager (verified HTTPS)", "argocd (for
+// nyancat)". Dependencies already in the cluster are left alone, so they are
+// not listed.
+func (s *appSelection) alsoInstalled() []string {
+	deps := s.dependencies()
+	var out []string
+	for _, a := range s.catalog {
+		if p, ok := s.providedApp(a.Name); ok {
+			out = append(out, fmt.Sprintf("%s (%s)", a.Name, p.Reason))
+		} else if d, ok := deps[a.Name]; ok && !s.installed[a.Name] {
+			out = append(out, fmt.Sprintf("%s (for %s)", a.Name, d.By))
+		}
+	}
+	return out
+}
+
+// dependencies are the apps the planner adds for the selection (the GitOps
+// controller of an argo/flux method, cnpg for keycloak), by name.
+func (s *appSelection) dependencies() map[string]apps.Dependency {
+	_, added, err := apps.Plan(s.requests(false))
+	if err != nil {
+		return nil
+	}
+	out := make(map[string]apps.Dependency, len(added))
+	for _, d := range added {
+		out[d.Name] = d
+	}
+	return out
 }
 
 // checklist builds the checklist that edits the selection: one row per
-// catalog app, its install methods as options.
+// catalog app, its install methods as options. The state column says why an
+// app is there without being ticked: installed already, included by the
+// cluster setup (locked), or added for a selected app.
 func (s *appSelection) checklist(title func() string) *checklist {
 	items := make([]checkItem, len(s.catalog))
 	for i, a := range s.catalog {
-		state := ""
-		if s.installed[a.Name] {
-			state = "installed"
-		}
 		options := make([]string, len(a.Methods))
 		for j, m := range a.Methods {
 			options[j] = string(m)
 		}
-		items[i] = checkItem{
-			columns: []string{a.Name, string(a.Category), state, a.Description},
-			options: options,
-			hint:    dependencyHint(a),
+		items[i] = checkItem{options: options}
+	}
+	c := &checklist{title: title, items: items, choice: s.appChoice}
+	c.refresh = func() { s.refreshItems(c.items) }
+	c.refresh()
+	return c
+}
+
+// refreshItems sets each row's state, lock and hint from the selection.
+func (s *appSelection) refreshItems(items []checkItem) {
+	deps := s.dependencies()
+	for i, a := range s.catalog {
+		it := &items[i]
+		state, hint := "", dependencyHint(a)
+		it.locked, it.fixed = "", ""
+		if p, ok := s.providedApp(a.Name); ok {
+			state = "included"
+			it.locked = fmt.Sprintf("%s installs it via %s", p.Reason, p.Method)
+			it.fixed = string(p.Method)
+		} else if s.installed[a.Name] {
+			state = "installed"
+		} else if d, ok := deps[a.Name]; ok {
+			state = "added"
+			hint = joinHints("added automatically: "+d.By+" needs it", hint)
+		}
+		it.columns = []string{a.Name, string(a.Category), state, a.Description}
+		it.hint = hint
+	}
+}
+
+func joinHints(hints ...string) string {
+	var out []string
+	for _, h := range hints {
+		if h != "" {
+			out = append(out, h)
 		}
 	}
-	return &checklist{title: title, items: items, choice: s.appChoice}
+	return strings.Join(out, " · ")
 }
 
 // dependencyHint tells what selecting an app also brings in.
@@ -319,5 +425,5 @@ func dependencyHint(a apps.App) string {
 	if slices.Contains(a.Methods, cluster.MethodFlux) {
 		parts = append(parts, "flux → adds Flux", "argo → adds Argo CD")
 	}
-	return strings.Join(parts, " · ")
+	return joinHints(parts...)
 }

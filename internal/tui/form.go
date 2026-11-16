@@ -10,6 +10,7 @@ import (
 	ui "github.com/gizak/termui/v3"
 	"github.com/gizak/termui/v3/widgets"
 
+	"github.com/rogerwesterbo/k8slocalcli/internal/apps"
 	"github.com/rogerwesterbo/k8slocalcli/internal/cluster"
 )
 
@@ -125,6 +126,7 @@ func newForm(initial cluster.Spec, versions map[cluster.Provider][]string) *form
 	initial.Exposure = withExposureDefaults(initial.Exposure)
 
 	f := &form{spec: initial, versions: versions, appSelection: newAppSelection(initial.Apps, nil)}
+	f.provided = func() []apps.ExposureApp { return apps.ExposureApps(f.spec.Exposure) }
 	f.onClose = func() {
 		f.preset = f.matchingPreset()
 		f.syncMethod()

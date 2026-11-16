@@ -145,6 +145,16 @@ func runCreate(ctx context.Context, spec cluster.Spec, values map[string]map[str
 	if err := spec.Validate(); err != nil {
 		return err
 	}
+	// The exposure setup installs some apps itself (cert-manager for verified
+	// HTTPS); a conflicting request must fail before anything is built.
+	kept, provided, err := apps.WithoutExposureApps(spec.Exposure, spec.Apps)
+	if err != nil {
+		return err
+	}
+	spec.Apps = kept
+	for _, a := range provided {
+		fmt.Fprintf(out, "ℹ️  %s comes with %s (installed via %s), so it is not installed a second time\n", a.Name, a.Reason, a.Method)
+	}
 
 	p, err := provider.Get(spec.Provider)
 	if err != nil {

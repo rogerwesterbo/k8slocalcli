@@ -133,6 +133,54 @@ func SetupExposure(ctx context.Context, env *Env, exp cluster.Exposure) error {
 	return nil
 }
 
+// ExposureApp is a catalog app that SetupExposure installs itself, so a
+// create must not install it a second time.
+type ExposureApp struct {
+	Name   string
+	Method cluster.InstallMethod
+	// Reason names the exposure setting that brings the app in.
+	Reason string
+}
+
+// ExposureApps lists the catalog apps SetupExposure installs for exp:
+// cert-manager, for verified HTTPS.
+func ExposureApps(exp cluster.Exposure) []ExposureApp {
+	if !exp.Enabled || exp.TLS != cluster.TLSVerified {
+		return nil
+	}
+	return []ExposureApp{{Name: certManagerApp.Name, Method: exp.CertManagerMethod, Reason: "verified HTTPS"}}
+}
+
+// WithoutExposureApps drops the requests for apps SetupExposure installs for
+// exp anyway. Installing them again right after would ask to re-apply what was
+// just installed, or refuse a different method once the cluster is built. A
+// request that names a different method on purpose is therefore an error, so
+// it is caught before anything is created; one left at the default method
+// follows the exposure's.
+func WithoutExposureApps(exp cluster.Exposure, reqs []cluster.AppRequest) (kept []cluster.AppRequest, dropped []ExposureApp, err error) {
+	provided := map[string]ExposureApp{}
+	for _, a := range ExposureApps(exp) {
+		provided[a.Name] = a
+	}
+	for _, r := range reqs {
+		p, ok := provided[r.Name]
+		if !ok {
+			kept = append(kept, r)
+			continue
+		}
+		if r.Method != p.Method && !r.MethodDefaulted {
+			fix := "leave it out of the apps"
+			if !r.Method.GitOps() {
+				fix += fmt.Sprintf(", or install it via %s with --cert-manager-method %s", r.Method, r.Method)
+			}
+			return nil, nil, fmt.Errorf("%s comes with %s, which installs it via %s before any app, so it cannot be installed via %s: %s",
+				r.Name, p.Reason, p.Method, r.Method, fix)
+		}
+		dropped = append(dropped, p)
+	}
+	return kept, dropped, nil
+}
+
 // GatewayInstalled reports whether the shared Gateway exists in the cluster.
 func GatewayInstalled(ctx context.Context, env *Env) bool {
 	_, err := env.kubectlQuiet(ctx, "get", "gateway", GatewayName, "-n", GatewayNamespace, "-o", "name")

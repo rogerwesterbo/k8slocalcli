@@ -314,10 +314,6 @@ func dependencies(app App, method cluster.InstallMethod) []string {
 	return deps
 }
 
-// Plan resolves requests and orders them so every app comes after what it
-// depends on, adding missing dependencies (with their default method, marked
-// Implicit so an already-installed one is skipped silently). added lists the
-// dependencies that were not requested, for telling the user.
 // storageRank orders storage apps first, by catalog position; every other
 // app ranks after them, equally.
 func storageRank(name string) int {
@@ -329,7 +325,20 @@ func storageRank(name string) int {
 	return len(catalog)
 }
 
-func Plan(reqs []cluster.AppRequest) (plan []cluster.AppRequest, added []string, err error) {
+// Dependency is an app Plan adds because a requested app needs it.
+type Dependency struct {
+	Name string
+	// By is the app that needs it first.
+	By string
+}
+
+func (d Dependency) String() string { return fmt.Sprintf("%s (required by %s)", d.Name, d.By) }
+
+// Plan resolves requests and orders them so every app comes after what it
+// depends on, adding missing dependencies (with their default method, marked
+// Implicit so an already-installed one is skipped silently). added lists the
+// dependencies that were not requested, for telling the user.
+func Plan(reqs []cluster.AppRequest) (plan []cluster.AppRequest, added []Dependency, err error) {
 	requested := map[string]cluster.AppRequest{}
 	var order []string
 	for _, r := range reqs {
@@ -368,7 +377,7 @@ func Plan(reqs []cluster.AppRequest) (plan []cluster.AppRequest, added []string,
 			}
 			r.Implicit = true
 			req = r
-			added = append(added, fmt.Sprintf("%s (required by %s)", name, by))
+			added = append(added, Dependency{Name: name, By: by})
 		}
 		app, _ := Lookup(name)
 		for _, d := range dependencies(app, req.Method) {

@@ -122,6 +122,13 @@ Understanding these four seams is enough to be productive:
   (`trivyRestartStaleOperator`). Its scan jobs run one Trivy per workload
   container in parallel on one cache dir; `trivyConfigFile` sets the memory
   cache backend, or all but one fail on the bbolt lock.
+  Apps the exposure stack installs itself (`ExposureApps`: cert-manager for
+  verified HTTPS) are dropped from create's requests by
+  `WithoutExposureApps` in `runCreate`, which refuses an explicit other
+  method up front — otherwise `Install` hits `reapplyMethod`'s refusal only
+  after the cluster is built. The create form shows them as ticked, locked
+  checklist rows (`checkItem.fixed`) and `Plan`'s dependencies as "added"
+  (`appSelection.refreshItems`, re-run on every change via `checklist.refresh`).
   Re-applying an installed app keeps the method it was installed with
   (`reapplyMethod`, via `DetectInstallation`) when none was given
   (`AppRequest.MethodDefaulted`), and refuses a different explicit one: Helm

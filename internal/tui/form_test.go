@@ -167,3 +167,71 @@ func TestFormPrefillFromSpec(t *testing.T) {
 		t.Errorf("prefill lost: %+v", got)
 	}
 }
+
+// With verified HTTPS, cert-manager shows as included (ticked, locked to the
+// "cert-manager via" method) and is never requested as an app; a preset that
+// has it still matches. A GitOps method shows its controller as added.
+func TestFormShowsAppsInstalledWithoutSelection(t *testing.T) {
+	f := newForm(cluster.Spec{}, nil)
+	f.spec.Exposure.TLS = cluster.TLSVerified
+	idx := map[string]int{}
+	for i, a := range f.catalog {
+		idx[a.Name] = i
+	}
+
+	f.openApps()
+	cm := idx["cert-manager"]
+	if row := f.open.rows()[cm]; !strings.HasPrefix(row, "[x] helm") || !strings.Contains(row, "included") {
+		t.Errorf("cert-manager row = %q, want ticked via helm and marked included", row)
+	}
+	f.open.cursor = cm
+	f.open.handleKey("<Space>")
+	f.open.handleKey("<Right>")
+	if len(f.buildSpec().Apps) != 0 {
+		t.Errorf("apps = %v, want cert-manager left to the exposure setup", f.buildSpec().Apps)
+	}
+
+	// nyancat via argo brings in Argo CD.
+	ny := idx["nyancat"]
+	f.open.cursor = ny
+	for f.appChoice[ny] == 0 || f.catalog[ny].Methods[f.appChoice[ny]-1] != cluster.MethodArgo {
+		f.open.handleKey("<Right>")
+	}
+	if row := f.open.rows()[idx["argocd"]]; !strings.Contains(row, "added") {
+		t.Errorf("argocd row = %q, want it marked added for nyancat's argo method", row)
+	}
+	f.open.handleKey("<Escape>")
+	text := f.appsText(false)
+	for _, want := range []string{"nyancat", "cert-manager (verified HTTPS)", "argocd (for nyancat)"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("Apps field = %q, want it to mention %q", text, want)
+		}
+	}
+
+	// The platform preset includes cert-manager; with verified HTTPS it is
+	// still the applied preset, and cert-manager is still not requested.
+	for i, p := range apps.Presets() {
+		if p.Name == "platform" {
+			f.preset = i + 1
+		}
+	}
+	f.applyPreset()
+	if !f.presetApplied() {
+		t.Error("the platform preset should count as applied")
+	}
+	for _, r := range f.buildSpec().Apps {
+		if r.Name == "cert-manager" {
+			t.Error("cert-manager must not be requested with verified HTTPS")
+		}
+	}
+
+	// Back to self-signed: the user's own tick on cert-manager returns.
+	f.spec.Exposure.TLS = cluster.TLSSelfSigned
+	found := false
+	for _, r := range f.buildSpec().Apps {
+		found = found || r.Name == "cert-manager"
+	}
+	if !found {
+		t.Error("with self-signed TLS, a ticked cert-manager is an app again")
+	}
+}

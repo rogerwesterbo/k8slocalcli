@@ -122,7 +122,10 @@ primary with two replicas on volumes and a password in Secret
 ### Security
 
 **cert-manager** — cert-manager. Also installed automatically with
-`--tls verified`.
+`--tls verified`, via `--cert-manager-method` (helm by default). Asking for it
+as an app then changes nothing: the create form shows it as *included*, and
+`--app cert-manager` is skipped. `--app cert-manager:<another method>` is
+refused before the cluster is built, since one app has one install method.
 
 **openbao** — OpenBao, UI at `openbao.localtest.me`. dev: the in-memory dev
 server, unsealed, token `root`, data lost on restart. production: a real

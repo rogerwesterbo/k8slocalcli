@@ -470,3 +470,38 @@ func parseCert(t *testing.T, certPEM []byte) *x509.Certificate {
 	}
 	return c
 }
+
+// Create drops apps the exposure setup installs itself, and refuses a
+// request that names another method for one before any cluster is built.
+func TestWithoutExposureApps(t *testing.T) {
+	verified := cluster.DefaultExposure()
+	verified.TLS = cluster.TLSVerified
+	parse := func(args ...string) []cluster.AppRequest {
+		t.Helper()
+		reqs, _, err := ParseSelection(args, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return reqs
+	}
+
+	kept, dropped, err := WithoutExposureApps(verified, parse("cert-manager", "argocd"))
+	if err != nil || len(kept) != 1 || kept[0].Name != "argocd" || len(dropped) != 1 || dropped[0].Method != cluster.MethodHelm {
+		t.Errorf("default method: kept %v, dropped %v, err %v; want argocd kept, cert-manager dropped (helm)", kept, dropped, err)
+	}
+	if _, dropped, err := WithoutExposureApps(verified, parse("cert-manager:helm")); err != nil || len(dropped) != 1 {
+		t.Errorf("same method: dropped %v, err %v; want it dropped", dropped, err)
+	}
+	for _, arg := range []string{"cert-manager:manifest", "cert-manager:argo"} {
+		if _, _, err := WithoutExposureApps(verified, parse(arg)); err == nil || !strings.Contains(err.Error(), "verified HTTPS") {
+			t.Errorf("%s: err = %v, want a conflict naming verified HTTPS", arg, err)
+		}
+	}
+
+	// Self-signed TLS or no exposure installs no cert-manager.
+	for _, exp := range []cluster.Exposure{cluster.DefaultExposure(), {}} {
+		if kept, dropped, err := WithoutExposureApps(exp, parse("cert-manager:manifest")); err != nil || len(kept) != 1 || len(dropped) != 0 {
+			t.Errorf("exposure %+v: kept %v, dropped %v, err %v; want cert-manager kept", exp, kept, dropped, err)
+		}
+	}
+}

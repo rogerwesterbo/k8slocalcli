@@ -17,9 +17,11 @@ type checkItem struct {
 	// methods). A single option makes the row a plain on/off toggle, and the
 	// option is then not shown.
 	options []string
-	// locked, when set, means the row cannot be ticked; it is shown as the
-	// reason in the help box.
+	// locked, when set, means the row cannot be changed; it is shown as the
+	// reason in the help box. The row is unticked, or ticked with fixed as
+	// its option when fixed is set (an app the cluster setup installs anyway).
 	locked string
+	fixed  string
 	// hint is shown in the help box while the cursor is on the row.
 	hint string
 }
@@ -34,6 +36,9 @@ type checklist struct {
 	items  []checkItem
 	choice []int
 	cursor int
+	// refresh, when set, updates the items after every change, for rows
+	// whose state depends on the rest of the selection.
+	refresh func()
 }
 
 // handleKey processes a key; it returns true when the checklist should close.
@@ -55,12 +60,19 @@ func (c *checklist) handleKey(id string) (closed bool) {
 		} else {
 			c.choice[c.cursor] = 0
 		}
+		c.changed()
 	case "<Right>", "l":
 		c.cycle(+1)
 	case "<Left>", "h":
 		c.cycle(-1)
 	}
 	return false
+}
+
+func (c *checklist) changed() {
+	if c.refresh != nil {
+		c.refresh()
+	}
 }
 
 // cycle moves the row under the cursor through off → each option.
@@ -71,6 +83,7 @@ func (c *checklist) cycle(delta int) {
 	}
 	m := len(it.options) + 1
 	c.choice[c.cursor] = ((c.choice[c.cursor]+delta)%m + m) % m
+	c.changed()
 }
 
 // hasOptions reports whether any row offers more than one option, i.e.
@@ -97,6 +110,8 @@ func (c *checklist) rows() []string {
 	for r, it := range c.items {
 		box, option := "[ ]", ""
 		switch {
+		case it.locked != "" && it.fixed != "":
+			box, option = "[x]", it.fixed
 		case it.locked != "":
 			box = "[-]"
 		case c.choice[r] > 0:
@@ -116,11 +131,12 @@ func (c *checklist) rows() []string {
 	return rows
 }
 
-// selectedCount is the number of ticked rows.
+// selectedCount is the number of rows ticked by the user (locked rows are
+// not a choice).
 func (c *checklist) selectedCount() int {
 	n := 0
-	for _, ch := range c.choice {
-		if ch > 0 {
+	for i, ch := range c.choice {
+		if ch > 0 && c.items[i].locked == "" {
 			n++
 		}
 	}
@@ -148,7 +164,10 @@ func (c *checklist) render(termW, termH int) []ui.Drawable {
 	keys += " · Enter/Esc: done"
 	it := c.items[c.cursor]
 	detail := it.hint
-	if it.locked != "" {
+	switch {
+	case it.locked != "" && it.fixed != "":
+		detail = "cannot be changed: " + it.locked
+	case it.locked != "":
 		detail = "cannot be selected: " + it.locked
 	}
 
@@ -160,12 +179,15 @@ func (c *checklist) render(termW, termH int) []ui.Drawable {
 	return []ui.Drawable{list, help}
 }
 
+// chooseHint follows a focused field that opens a checklist.
+var chooseHint = "  " + dim("(Enter: choose)")
+
 // selectionText summarises a checklist selection on the field that opens it:
 // "3: a, b, c", or "none".
 func selectionText(names []string, focused bool) string {
 	hint := ""
 	if focused {
-		hint = "  " + dim("(Enter: choose)")
+		hint = chooseHint
 	}
 	if len(names) == 0 {
 		return dim("none") + hint
