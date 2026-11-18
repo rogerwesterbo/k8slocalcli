@@ -92,7 +92,7 @@ API channel, install methods, ...).
 
 Install a catalog of apps into a cluster — MetalLB, metrics-server,
 cert-manager, local-path, NFS, Longhorn, Flux, Argo CD, Crossplane,
-CloudNativePG, Valkey, OpenBao, Keycloak, Trivy Operator,
+KubeVirt, CDI, CloudNativePG, Valkey, OpenBao, Keycloak, Trivy Operator,
 kube-prometheus-stack, k8sdockside and nyancat — or a preset bundle of them:
 
 ```sh

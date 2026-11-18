@@ -22,3 +22,11 @@ func TestCurrentIsDocker(t *testing.T) {
 		t.Errorf("Current() = %+v, want the Docker engine", Current())
 	}
 }
+
+func TestKubernetesArch(t *testing.T) {
+	for in, want := range map[string]string{"x86_64": "amd64", "aarch64": "arm64", "arm64": "arm64", "s390x": "s390x"} {
+		if got := KubernetesArch(in); got != want {
+			t.Errorf("KubernetesArch(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

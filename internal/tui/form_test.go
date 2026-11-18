@@ -22,7 +22,7 @@ func focusOn(t *testing.T, f *form, id fieldID) {
 
 // The form opens on the cluster name, and the provider picker comes right after.
 func TestFormFieldOrder(t *testing.T) {
-	f := newForm(cluster.Spec{}, nil)
+	f := newForm(cluster.Spec{}, nil, nil)
 	if f.focused().id != fieldName {
 		t.Fatalf("initial focus = %d, want fieldName", f.focused().id)
 	}
@@ -39,7 +39,7 @@ func TestFormFieldOrder(t *testing.T) {
 
 // Exposure defaults to on; turning it off skips every gateway question.
 func TestExposeOffSkipsGatewayFields(t *testing.T) {
-	f := newForm(cluster.Spec{}, nil)
+	f := newForm(cluster.Spec{}, nil, nil)
 	if !f.spec.Exposure.Enabled {
 		t.Fatal("exposure should default to on")
 	}
@@ -59,7 +59,7 @@ func TestExposeOffSkipsGatewayFields(t *testing.T) {
 
 // cert-manager is only asked about for verified certificates.
 func TestCertManagerOnlyForVerifiedTLS(t *testing.T) {
-	f := newForm(cluster.Spec{}, nil)
+	f := newForm(cluster.Spec{}, nil, nil)
 	focusOn(t, f, fieldCertManagerMethod)
 	if f.enabled(f.focused()) {
 		t.Fatal("cert-manager method should be disabled for self-signed")
@@ -78,7 +78,7 @@ func TestCertManagerOnlyForVerifiedTLS(t *testing.T) {
 // The picker toggles apps (default method) and cycles their methods, and the
 // selection reaches the spec with the app's default host.
 func TestAppPicker(t *testing.T) {
-	f := newForm(cluster.Spec{Name: "dev"}, nil)
+	f := newForm(cluster.Spec{Name: "dev"}, nil, nil)
 	if len(f.buildSpec().Apps) != 0 {
 		t.Fatal("apps should default to none")
 	}
@@ -119,7 +119,7 @@ func TestAppPicker(t *testing.T) {
 // Browsing presets changes nothing; Enter applies the shown one and "none"
 // clears it again. The profile is part of the spec.
 func TestPresetAndProfile(t *testing.T) {
-	f := newForm(cluster.Spec{Name: "dev"}, nil)
+	f := newForm(cluster.Spec{Name: "dev"}, nil, nil)
 	if f.spec.Profile != cluster.ProfileDev {
 		t.Fatalf("profile = %q, want dev", f.spec.Profile)
 	}
@@ -161,7 +161,7 @@ func TestPresetAndProfile(t *testing.T) {
 func TestFormPrefillFromSpec(t *testing.T) {
 	spec := cluster.DefaultSpec()
 	spec.Apps = []cluster.AppRequest{{Name: "argocd", Method: cluster.MethodManifest, Host: "cd.localtest.me"}}
-	f := newForm(spec, nil)
+	f := newForm(spec, nil, nil)
 	got := f.buildSpec().Apps
 	if len(got) != 1 || got[0] != spec.Apps[0] {
 		t.Errorf("prefill lost: %+v", got)
@@ -172,7 +172,7 @@ func TestFormPrefillFromSpec(t *testing.T) {
 // "cert-manager via" method) and is never requested as an app; a preset that
 // has it still matches. A GitOps method shows its controller as added.
 func TestFormShowsAppsInstalledWithoutSelection(t *testing.T) {
-	f := newForm(cluster.Spec{}, nil)
+	f := newForm(cluster.Spec{}, nil, nil)
 	f.spec.Exposure.TLS = cluster.TLSVerified
 	idx := map[string]int{}
 	for i, a := range f.catalog {

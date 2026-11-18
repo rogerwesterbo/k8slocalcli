@@ -117,8 +117,9 @@ func (e *Env) helmReleaseExists(ctx context.Context, release, namespace string) 
 }
 
 // Dependants returns why app cannot be removed safely: installed apps that
-// require it, apps handed to it as a GitOps controller, and the gateway
-// certificate when it is cert-manager. Apps in removing are being removed in
+// require it, apps handed to it as a GitOps controller, the gateway
+// certificate when it is cert-manager, and the VMs or DataVolumes that
+// KubeVirt or CDI would take with them. Apps in removing are being removed in
 // the same run and do not count.
 func Dependants(ctx context.Context, env *Env, app App, removing map[string]bool) []string {
 	var out []string
@@ -141,11 +142,33 @@ func Dependants(ctx context.Context, env *Env, app App, removing map[string]bool
 			}
 		}
 	}
+	// KubeVirt's and CDI's operators delete their CRDs when uninstalled, and
+	// with them every VM and DataVolume in the cluster. Objects owned by an
+	// ownerKind (a started VM's instance) are left out: the owner is listed.
+	listDeletedWith := func(kind, ownerKind string) {
+		rows, err := env.kubectlQuiet(ctx, "get", kind, "-A", "-o",
+			`jsonpath={range .items[*]}{.metadata.namespace}/{.metadata.name} {.metadata.ownerReferences[0].kind}{"\n"}{end}`)
+		if err != nil {
+			return
+		}
+		for _, row := range strings.Split(strings.TrimSpace(rows), "\n") {
+			ref, owner, _ := strings.Cut(row, " ")
+			if ref == "" || (ownerKind != "" && owner == ownerKind) {
+				continue
+			}
+			out = append(out, fmt.Sprintf("%s %s would be deleted with it", strings.Split(kind, ".")[0], ref))
+		}
+	}
 	switch app.Name {
 	case fluxApp.Name:
 		listOthers(fluxHelmReleaseCRD, fluxNamespace)
 	case argoCDApp.Name:
 		listOthers(argoApplicationCRD, argoCDNamespace)
+	case kubevirtApp.Name:
+		listDeletedWith("virtualmachines.kubevirt.io", "")
+		listDeletedWith("virtualmachineinstances.kubevirt.io", "VirtualMachine")
+	case cdiApp.Name:
+		listDeletedWith("datavolumes.cdi.kubevirt.io", "")
 	case certManagerApp.Name:
 		if env.exists(ctx, GatewayNamespace, "certificates.cert-manager.io/"+TLSSecretName) {
 			out = append(out, "the gateway's verified HTTPS certificate is issued by it")
@@ -243,7 +266,8 @@ type UninstallOptions struct {
 // Uninstall removes one app the way it was installed, then its route, waits
 // for its workloads to be gone and, with Purge, deletes its namespaces.
 // CRDs are kept (as Helm does): deleting one deletes every resource of that
-// kind in the cluster.
+// kind in the cluster. Operator-managed apps (operatorCR) are the exception:
+// their operators remove their own CRDs.
 func Uninstall(ctx context.Context, env *Env, app App, inst Installation, opts UninstallOptions) error {
 	var kept []string
 	// Data the app's operator manages goes first, while the operator is

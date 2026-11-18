@@ -95,9 +95,11 @@ type form struct {
 
 // Run launches the interactive form, pre-filled from initial, and returns the
 // collected Spec. versions provides the selectable Kubernetes versions per
-// provider (newest first). It blocks until the user confirms or cancels.
-func Run(initial cluster.Spec, versions map[cluster.Provider][]string) (Result, error) {
-	f := newForm(initial, versions)
+// provider (newest first); unavailable gives, per app that cannot work on
+// this machine, why not (apps.Unavailable), and those apps are locked. It
+// blocks until the user confirms or cancels.
+func Run(initial cluster.Spec, versions map[cluster.Provider][]string, unavailable map[string]string) (Result, error) {
+	f := newForm(initial, versions, unavailable)
 	var res Result
 	err := runLoop(f.layout, f.render, func(id string) (bool, error) {
 		done, r, err := f.handleKey(id)
@@ -107,7 +109,7 @@ func Run(initial cluster.Spec, versions map[cluster.Provider][]string) (Result, 
 	return res, err
 }
 
-func newForm(initial cluster.Spec, versions map[cluster.Provider][]string) *form {
+func newForm(initial cluster.Spec, versions map[cluster.Provider][]string, unavailable map[string]string) *form {
 	if !initial.Provider.Valid() {
 		initial.Provider = cluster.ProviderKind
 	}
@@ -125,7 +127,7 @@ func newForm(initial cluster.Spec, versions map[cluster.Provider][]string) *form
 	}
 	initial.Exposure = withExposureDefaults(initial.Exposure)
 
-	f := &form{spec: initial, versions: versions, appSelection: newAppSelection(initial.Apps, nil)}
+	f := &form{spec: initial, versions: versions, appSelection: newAppSelection(initial.Apps, nil, unavailable)}
 	f.provided = func() []apps.ExposureApp { return apps.ExposureApps(f.spec.Exposure) }
 	f.onClose = func() {
 		f.preset = f.matchingPreset()

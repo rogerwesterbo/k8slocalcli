@@ -118,18 +118,20 @@ Every catalog app (`internal/apps`) runs through the same steps
 | Step | Timeout | What |
 |------|---------|------|
 | connect | 20s | the kube context exists and `/readyz` (or `/version`) answers |
-| precheck | 1m | helm on PATH, Flux/Argo CD CRDs for the gitops methods, dependencies, the nodes' CPU architecture has the app's images, app preflight (default StorageClass, Longhorn on container nodes), already installed? |
-| install | 10m (15m for Longhorn, Keycloak, kube-prometheus-stack) | app `prepare` (Secrets, databases), then helm `--wait` / manifest / Flux HelmRelease Ready / Argo CD Synced+Healthy |
+| precheck | 1m | helm on PATH, Flux/Argo CD CRDs for the gitops methods, dependencies, the nodes' CPU architecture has the app's images, app preflight (default StorageClass, Longhorn on container nodes), a node the app can work on (KubeVirt: KVM, or amd64 with emulation), already installed? |
+| install | 10m (15m for Longhorn, Keycloak, kube-prometheus-stack, KubeVirt, CDI) | app `prepare` (Secrets, databases), then helm `--wait` / manifest (+ an operator's custom resource Available, for KubeVirt and CDI) / Flux HelmRelease Ready / Argo CD Synced+Healthy |
 | verify | 5m | `rollout status` for every Deployment, StatefulSet and DaemonSet in the app namespace (or the app's `Workloads`) |
-| postcheck | 5m | app `configure` (MetalLB pool, postgres cluster), CRD Established, app `check`, route |
+| postcheck | 5m | app `configure` (MetalLB pool, postgres cluster, CDI's StorageProfiles), CRD Established, app `check` (e.g. a test VM boots), route |
 
 While install and verify run, the live status line summarises the app's pods.
 When a new pod's image can never be pulled — no build for the node's CPU
 architecture, a tag that does not exist, or a certificate error behind a
 TLS-intercepting proxy — the step stops at once and names the image and the
 cause, instead of waiting out its timeout. Retryable pull errors (rate limits,
-network blips) are left to kubelet. Every pinned image is checked for amd64
-and arm64 builds before a version bump ships (`TestImageArchAudit`).
+network blips) are left to kubelet. Every image a pinned chart or manifest
+names (fields, operator flags and env values) is checked for amd64 and arm64
+builds before a version bump ships (`TestImageArchAudit`); images an operator
+derives at runtime, such as KubeVirt's, are checked by hand.
 
 An app describes only what is specific to it: a chart (which gives it the
 helm, flux and argo methods; values are a map so all three use the same
@@ -149,7 +151,9 @@ HelmRelease named after the app → delete it (the controller removes what it
 deployed; Argo CD through its resources finalizer); a Helm release → `helm
 uninstall --wait`; a Deployment labelled `k8slocalcli.io/installed-by=manifest`
 (set by every manifest install) → delete the same upstream manifest minus its
-CRDs and Namespaces. Anything else present is reported as "not installed by
+CRDs and Namespaces (KubeVirt and CDI first delete their custom resource,
+after which their operators remove the components and their CRDs; the last
+CRD goes too, see `operatorCR.remove`). Anything else present is reported as "not installed by
 k8slocalcli" and left alone. Steps: connect → precheck all apps (method,
 `Dependants`) before removing any → confirm → remove (5m) → wait until gone
 (2m) → with `--purge`, delete the namespaces (5m; data namespaces such as

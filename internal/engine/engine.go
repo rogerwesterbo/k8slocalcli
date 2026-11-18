@@ -46,6 +46,32 @@ func Current() Engine { return Docker }
 // Available reports whether the engine CLI is on PATH.
 func (e Engine) Available() bool { return runner.LookPath(e.Binary) }
 
+// Host returns the CPU architecture (in Kubernetes' names, e.g. arm64) and
+// kernel version of the machine the engine runs containers on. kind and
+// Talos nodes are containers there, so it is what their nodes will report,
+// known before a cluster exists (e.g. "arm64", "7.0.14-linuxkit" for
+// Docker Desktop on Apple Silicon).
+func (e Engine) Host(ctx context.Context) (arch, kernel string, err error) {
+	out, err := runner.New(nil).Capture(ctx, e.Binary, "info", "--format", "{{.Architecture}} {{.KernelVersion}}")
+	if err != nil {
+		return "", "", err
+	}
+	arch, kernel, _ = strings.Cut(strings.TrimSpace(out), " ")
+	return KubernetesArch(arch), kernel, nil
+}
+
+// KubernetesArch turns the architecture a container engine reports (uname
+// -m style: x86_64, aarch64) into the name Kubernetes uses for nodes.
+func KubernetesArch(machine string) string {
+	switch machine {
+	case "x86_64":
+		return "amd64"
+	case "aarch64":
+		return "arm64"
+	}
+	return machine
+}
+
 // PortOwner returns the name of a running container already publishing
 // hostPort, or "" when the port is free. The engine is the allocator here, so
 // asking it is authoritative; binding a probe socket would not work, since ports

@@ -505,3 +505,47 @@ func TestWithoutExposureApps(t *testing.T) {
 		}
 	}
 }
+
+// KubeVirt can run VMs with KVM, and without it (Docker Desktop's linuxkit
+// kernel) only emulated on amd64.
+func TestKubeVirtCanRunVMs(t *testing.T) {
+	for _, tc := range []struct {
+		n         Node
+		emulation bool
+		want      bool
+	}{
+		{Node{"arm64", "7.0.14-linuxkit"}, true, false},
+		{Node{"amd64", "6.10.14-linuxkit"}, true, true},
+		{Node{"amd64", "6.10.14-linuxkit"}, false, false},
+		{Node{"arm64", "6.12.40-talos"}, false, true},
+		{Node{"amd64", "6.8.0-generic"}, false, true},
+	} {
+		if got := kubevirtCanRunVMs(tc.n, tc.emulation); got != tc.want {
+			t.Errorf("kubevirtCanRunVMs(%+v, %v) = %v, want %v", tc.n, tc.emulation, got, tc.want)
+		}
+	}
+}
+
+// Unavailable locks apps on nodes they cannot work on, says why, and locks
+// nothing when the nodes are unknown.
+func TestUnavailable(t *testing.T) {
+	mac := []Node{{"arm64", "7.0.14-linuxkit"}}
+	got := Unavailable(mac, false)
+	if !strings.Contains(got["kubevirt"], "no /dev/kvm") || len(got) != 1 {
+		t.Errorf("Apple Silicon Docker Desktop: Unavailable = %v, want only kubevirt", got)
+	}
+	if got := Unavailable([]Node{{"amd64", "6.10.14-linuxkit"}}, false); len(got) != 0 {
+		t.Errorf("amd64 Docker Desktop: Unavailable = %v, want none", got)
+	}
+	if got := Unavailable([]Node{{"arm64", "6.12.40-talos"}, {"arm64", "6.12.40-talos"}}, true); len(got) != 0 {
+		t.Errorf("arm64 with KVM: Unavailable = %v, want none", got)
+	}
+	if got := Unavailable(nil, false); len(got) != 0 {
+		t.Errorf("unknown nodes: Unavailable = %v, want none", got)
+	}
+	// An app whose images lack an architecture is locked on such nodes.
+	a := App{Name: "x", Arches: []string{"amd64"}}
+	if reason := a.unavailableOn(mac, false); !strings.Contains(reason, "no images for arm64") {
+		t.Errorf("amd64-only app on arm64: %q", reason)
+	}
+}

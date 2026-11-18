@@ -25,6 +25,10 @@ type appSelection struct {
 	preset int
 	// installed marks apps already in the target cluster (app install only).
 	installed map[string]bool
+	// unavailable gives, per app that cannot work on the target (an existing
+	// cluster's nodes, or the machine a new one would run on), why not. Such
+	// apps show as locked and are never part of the requests.
+	unavailable map[string]string
 	// method is the Method field: one install method for every selected app
 	// that supports it, or "" for each app's own (chosen in the checklist).
 	method cluster.InstallMethod
@@ -41,8 +45,8 @@ var methodChoices = append([]cluster.InstallMethod{""}, cluster.InstallMethods..
 
 // newAppSelection starts from the catalog defaults, pre-filled with initial
 // (e.g. from --app flags).
-func newAppSelection(initial []cluster.AppRequest, installed map[string]bool) appSelection {
-	s := appSelection{catalog: apps.Catalog(), installed: installed}
+func newAppSelection(initial []cluster.AppRequest, installed map[string]bool, unavailable map[string]string) appSelection {
+	s := appSelection{catalog: apps.Catalog(), installed: installed, unavailable: unavailable}
 	s.appChoice = make([]int, len(s.catalog))
 	s.appHost = make([]string, len(s.catalog))
 	for i, a := range s.catalog {
@@ -81,10 +85,10 @@ func (s *appSelection) providedApp(name string) (apps.ExposureApp, bool) {
 	return apps.ExposureApp{}, false
 }
 
-// chosen reports whether catalog[i] is selected by the user and not
-// installed by the cluster setup anyway.
+// chosen reports whether catalog[i] is selected by the user, can work on
+// the target, and is not installed by the cluster setup anyway.
 func (s *appSelection) chosen(i int) bool {
-	if s.appChoice[i] == 0 {
+	if s.appChoice[i] == 0 || s.unavailable[s.catalog[i].Name] != "" {
 		return false
 	}
 	_, provided := s.providedApp(s.catalog[i].Name)
@@ -391,7 +395,10 @@ func (s *appSelection) refreshItems(items []checkItem) {
 		it := &items[i]
 		state, hint := "", dependencyHint(a)
 		it.locked, it.fixed = "", ""
-		if p, ok := s.providedApp(a.Name); ok {
+		if reason := s.unavailable[a.Name]; reason != "" {
+			state = "unsupported"
+			it.locked = reason
+		} else if p, ok := s.providedApp(a.Name); ok {
 			state = "included"
 			it.locked = fmt.Sprintf("%s installs it via %s", p.Reason, p.Method)
 			it.fixed = string(p.Method)
@@ -416,9 +423,10 @@ func joinHints(hints ...string) string {
 	return strings.Join(out, " · ")
 }
 
-// dependencyHint tells what selecting an app also brings in.
+// dependencyHint tells what selecting an app also brings in, after the
+// app's own hint.
 func dependencyHint(a apps.App) string {
-	var parts []string
+	parts := []string{a.Hint}
 	if len(a.Requires) > 0 {
 		parts = append(parts, a.Name+" needs "+strings.Join(a.Requires, ", ")+" (added automatically)")
 	}

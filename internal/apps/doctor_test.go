@@ -43,7 +43,7 @@ func TestParsePodSecurityEvents(t *testing.T) {
 // the pods local-path and Trivy create at runtime). Changing the list means
 // re-running that audit.
 func TestPrivilegedApps(t *testing.T) {
-	want := []string{"kube-prometheus-stack", "local-path", "longhorn", "metallb", "nfs", "trivy-operator"}
+	want := []string{"kube-prometheus-stack", "kubevirt", "local-path", "longhorn", "metallb", "nfs", "trivy-operator"}
 	var got []string
 	for _, a := range Catalog() {
 		if a.Privileged {

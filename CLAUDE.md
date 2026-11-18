@@ -85,8 +85,9 @@ Understanding these four seams is enough to be productive:
   | `uninstall.go` | `PlanUninstall`, `DetectInstallation` (typed `InstallState`), `Dependants`, `Uninstall` |
   | `doctor.go` | Pod Security: `PodSecurityFindings` (catalog gaps + FailedCreate rejections anywhere), `repairPodSecurity` (run by `InstallAll`) |
   | `helm.go` / `gitops.go` | the three chart methods: `helmInstall`, `fluxInstall`, `argoInstall`; `renderChart` merges app values + `--values` |
-  | `kube.go` | cluster building blocks: `kubectl*`, `apply*`, `exists`, Secrets, namespaces, `defaultStorageClass`, `isTalos`, `retry`, `remaining` |
-  | `checks.go` | reusable preflights (`requireDefaultStorageClass`) and functional checks (`storageSmokeTest`) |
+  | `kube.go` | cluster building blocks: `kubectl*`, `apply*`, `exists`, Secrets, namespaces, `defaultStorageClass`, `isTalos`, `lastWarning`, `retry`, `remaining` |
+  | `checks.go` | reusable preflights (`requireDefaultStorageClass`) and functional checks (`storageSmokeTest`, `smokeTest` for a throwaway custom resource) |
+  | `operator.go` | `operatorCR`: apps whose manifest is an operator that deploys everything from one custom resource (KubeVirt, CDI) |
   | `notes.go` | `printAccess` = URL + app notes, used by install, skip and `info` |
   | `cabundle.go` | corporate CA bundle for pods that fetch over HTTPS |
   | `values.go` | `ParseSelection`, `ParseValuesFlags`, `mergeValues` |
@@ -136,7 +137,22 @@ Understanding these four seams is enough to be productive:
   those too, so `helmManaged` checks Helm's `meta.helm.sh/release-name`.
   Uninstall finds the method live; manifest installs are only recognised by the
   `k8slocalcli.io/installed-by=manifest` label. Never delete CRDs or protected
-  namespaces. Verify new apps on **both** kind and Talos (see the Talos Pod
+  namespaces — except an `operatorCR`'s own (`operator.go`): KubeVirt
+  and CDI install an operator from the manifest and everything else via one
+  custom resource, which `afterManifest` applies and waits Available for
+  (`operatorCR.deploy`) and `beforeRemove` deletes (`operatorCR.remove`,
+  then waits for the `app.kubernetes.io/managed-by` components). Their
+  operators delete all their other CRDs on removal, and a left-over `cdis`
+  CRD keeps `cdi.kubevirt.io` served, which crash-loops KubeVirt's
+  virt-template-controller ("no matches for kind DataVolume"). Both CRs set
+  `uninstallStrategy: BlockUninstallIfWorkloadsExist` (the default deletes
+  every VM/DataVolume) and `Dependants` lists them. KubeVirt cannot run VMs
+  on arm64 without KVM (only `host-passthrough` is allowed, which QEMU cannot
+  emulate), so its `unsupported` check rejects Docker Desktop (`linuxkit`
+  kernel) arm64 nodes; kind's pod MTU 65535 on Docker Desktop is above a tap
+  device's limit (65521). CDI does not know `rancher.io/local-path`, so
+  `cdiLocalPathProfiles` sets its StorageProfiles' access/volume mode.
+  Verify new apps on **both** kind and Talos (see the Talos Pod
   Security gotcha below), and after adding an app or bumping a chart run the
   opt-in `TestPodSecurityAudit` (`podsecurity_audit_test.go`) against a
   throwaway cluster: it fails when an app's rendered workloads break Pod
@@ -145,11 +161,16 @@ Understanding these four seams is enough to be productive:
   run the opt-in `TestImageArchAudit` (`imagearch_audit_test.go`,
   `K8SLOCALCLI_IMAGE_AUDIT=1` or `=<app>,…`; needs helm + docker, no cluster):
   it checks every rendered/manifest image (incl. operator flags like
-  `--prometheus-config-reloader=`) has a build for each of the app's
+  `--prometheus-config-reloader=` and env values like CDI's `IMPORTER_IMAGE`) has a build for each of the app's
   `Arches` (default amd64 + arm64) — Prometheus Operator v0.95.1 shipped an
   amd64-only index and broke every Apple Silicon install. An app whose images
   genuinely lack an architecture sets `Arches`; the precheck
-  (`requireNodeArch`) then refuses clusters with no such node. Adding a gateway controller = implement
+  (`requireSupportedNodes`) then refuses clusters with no such node. That
+  check and an app's own `unsupported(nodes, external)` (KubeVirt: no KVM)
+  feed `apps.Unavailable`, which the CLI evaluates on the engine's host
+  (`engine.Host`) before `create` builds anything — refusing such `--app`s
+  up front — and on the cluster's nodes for `app install`; both pickers
+  lock those rows with the reason (`appSelection.unavailable`). Adding a gateway controller = implement
   `GatewayController` (contract in `gateway.go`), add it to `controllers` and
   `cluster.GatewayControllers`.
 

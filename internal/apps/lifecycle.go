@@ -237,7 +237,7 @@ func precheck(ctx context.Context, env *Env, app App, method cluster.InstallMeth
 			return false, fmt.Errorf("%s needs %s, which is not installed; install it first: k8slocalcli app install %s", app.Name, dep.Name, dep.Name)
 		}
 	}
-	if err := requireNodeArch(cctx, env, app); err != nil {
+	if err := requireSupportedNodes(cctx, env, app); err != nil {
 		return false, err
 	}
 	if app.preflight != nil {
@@ -325,15 +325,19 @@ func installApp(ctx context.Context, env *Env, app App, method cluster.InstallMe
 		if err := env.kubectl(ctx, args...); err != nil {
 			return err
 		}
-		if app.afterManifest != nil {
-			if err := app.afterManifest(ctx, env); err != nil {
-				return err
-			}
-		}
 		// Plain manifests leave no record of who applied them; the label
 		// lets uninstall tell our install from one it must not touch
-		// (kind's own local-path-provisioner).
-		return env.markManifestInstall(ctx, app)
+		// (kind's own local-path-provisioner). It goes on before
+		// afterManifest, which may fail or be cancelled (an operator's
+		// custom resource that never gets Available): what was applied
+		// must stay removable.
+		if err := env.markManifestInstall(ctx, app); err != nil {
+			return err
+		}
+		if app.afterManifest != nil {
+			return app.afterManifest(ctx, env)
+		}
+		return nil
 	case cluster.MethodHelm, cluster.MethodFlux, cluster.MethodArgo:
 		if app.chart == nil {
 			return fmt.Errorf("%s has no Helm chart", app.Name)

@@ -136,10 +136,11 @@ func newAppInstallCmd() *cobra.Command {
 			env.Values = values
 			if interactive {
 				res, err := tui.RunAppInstall(tui.InstallOptions{
-					Target:    installTarget(env),
-					Routable:  env.Exposed,
-					Installed: apps.InstalledApps(ctx, env),
-					Profile:   cluster.Profile(profileFlag),
+					Target:      installTarget(env),
+					Routable:    env.Exposed,
+					Installed:   apps.InstalledApps(ctx, env),
+					Unavailable: apps.Unavailable(env.Nodes(ctx), env.External()),
+					Profile:     cluster.Profile(profileFlag),
 				})
 				if err != nil {
 					return err

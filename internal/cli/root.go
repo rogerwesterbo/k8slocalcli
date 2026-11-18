@@ -13,6 +13,7 @@ import (
 
 	"github.com/rogerwesterbo/k8slocalcli/internal/apps"
 	"github.com/rogerwesterbo/k8slocalcli/internal/cluster"
+	"github.com/rogerwesterbo/k8slocalcli/internal/engine"
 	"github.com/rogerwesterbo/k8slocalcli/internal/progress"
 	"github.com/rogerwesterbo/k8slocalcli/internal/provider"
 	"github.com/rogerwesterbo/k8slocalcli/internal/runner"
@@ -88,7 +89,7 @@ func newCreateCmd() *cobra.Command {
 				for _, p := range provider.All() {
 					versions[p.Name()] = p.KubernetesVersions(ctx)
 				}
-				res, err := tui.Run(spec, versions)
+				res, err := tui.Run(spec, versions, hostUnavailable(ctx))
 				if err != nil {
 					return err
 				}
@@ -154,6 +155,9 @@ func runCreate(ctx context.Context, spec cluster.Spec, values map[string]map[str
 	spec.Apps = kept
 	for _, a := range provided {
 		fmt.Fprintf(out, "ℹ️  %s comes with %s (installed via %s), so it is not installed a second time\n", a.Name, a.Reason, a.Method)
+	}
+	if err := refuseUnavailableApps(spec.Apps, hostUnavailable(ctx)); err != nil {
+		return err
 	}
 
 	p, err := provider.Get(spec.Provider)
@@ -386,4 +390,32 @@ func clearExisting(ctx context.Context, p provider.Provider, spec cluster.Spec, 
 		return fmt.Errorf("leftovers of %s cluster %q block creation; run `k8slocalcli delete %s --provider %s` or pass --yes", spec.Provider, spec.Name, spec.Name, spec.Provider)
 	}
 	return p.Delete(ctx, spec.Name, out)
+}
+
+// hostUnavailable is apps.Unavailable for a cluster about to be created on
+// this machine: its nodes will be containers on the engine's host, with its
+// CPU architecture and kernel. Nil when the engine cannot be asked; creating
+// the cluster reports that itself.
+func hostUnavailable(ctx context.Context) map[string]string {
+	arch, kernel, err := engine.Current().Host(ctx)
+	if err != nil || arch == "" {
+		return nil
+	}
+	return apps.Unavailable([]apps.Node{{Arch: arch, Kernel: kernel}}, false)
+}
+
+// refuseUnavailableApps fails when a requested app, or one it depends on,
+// cannot work on this machine, so create stops before building a cluster
+// that the app would only fail on. Plan errors are left to the install.
+func refuseUnavailableApps(reqs []cluster.AppRequest, unavailable map[string]string) error {
+	plan, _, err := apps.Plan(reqs)
+	if err != nil {
+		return nil
+	}
+	for _, r := range plan {
+		if reason := unavailable[r.Name]; reason != "" {
+			return fmt.Errorf("%s cannot work on this machine, so the cluster was not created: %s", r.Name, reason)
+		}
+	}
+	return nil
 }

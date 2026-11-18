@@ -146,7 +146,7 @@ func (c *checklist) selectedCount() int {
 // render lays the checklist out over the whole terminal.
 func (c *checklist) render(termW, termH int) []ui.Drawable {
 	w := min(termW-2, 130)
-	listH := max(termH-2-4, 5)
+	listH := max(termH-2-helpH, 5)
 
 	list := widgets.NewList()
 	list.Title = fmt.Sprintf(" %s · %d selected ", c.title(), c.selectedCount())
@@ -162,21 +162,31 @@ func (c *checklist) render(termW, termH int) []ui.Drawable {
 		keys += " · ←/→: method"
 	}
 	keys += " · Enter/Esc: done"
-	it := c.items[c.cursor]
-	detail := it.hint
-	switch {
-	case it.locked != "" && it.fixed != "":
-		detail = "cannot be changed: " + it.locked
-	case it.locked != "":
-		detail = "cannot be selected: " + it.locked
-	}
 
 	help := widgets.NewParagraph()
 	help.Title = " Keys "
-	help.Text = keys + "\n" + detail
-	help.WrapText = false
-	help.SetRect(formMargin, formMargin+listH, formMargin+w, formMargin+listH+4)
+	help.Text = keys + "\n" + c.detail()
+	help.WrapText = true
+	help.SetRect(formMargin, formMargin+listH, formMargin+w, formMargin+listH+helpH)
 	return []ui.Drawable{list, help}
+}
+
+// helpH is the height of the help box under the list: its border, the keys
+// and up to three wrapped lines about the row under the cursor (an app's
+// hint, or why it cannot be selected).
+const helpH = 6
+
+// detail says what the row under the cursor is about: why it is locked, or
+// its hint.
+func (c *checklist) detail() string {
+	it := c.items[c.cursor]
+	switch {
+	case it.locked != "" && it.fixed != "":
+		return "cannot be changed: " + it.locked
+	case it.locked != "":
+		return "cannot be selected: " + it.locked
+	}
+	return it.hint
 }
 
 // chooseHint follows a focused field that opens a checklist.

@@ -59,15 +59,16 @@ func (x *Expose) routeYAML(app, namespace, host string) string {
 type Category string
 
 const (
-	CategoryNetworking    Category = "networking"
-	CategoryStorage       Category = "storage"
-	CategoryGitOps        Category = "gitops"
-	CategoryPlatform      Category = "platform"
-	CategoryData          Category = "data"
-	CategorySecurity      Category = "security"
-	CategoryObservability Category = "observability"
-	CategoryManagement    Category = "management"
-	CategoryDemo          Category = "demo"
+	CategoryNetworking     Category = "networking"
+	CategoryStorage        Category = "storage"
+	CategoryGitOps         Category = "gitops"
+	CategoryPlatform       Category = "platform"
+	CategoryVirtualization Category = "virtualization"
+	CategoryData           Category = "data"
+	CategorySecurity       Category = "security"
+	CategoryObservability  Category = "observability"
+	CategoryManagement     Category = "management"
+	CategoryDemo           Category = "demo"
 )
 
 // App is a catalog application. An app only describes what is specific to
@@ -142,6 +143,14 @@ type App struct {
 	// means defaultArches. The precheck refuses clusters with no such node,
 	// and TestImageArchAudit fails when a pinned image lacks one of them.
 	Arches []string
+	// Hint is shown in the app pickers while the app is highlighted: what it
+	// needs, or where it cannot run, beyond what Description has room for.
+	Hint string
+	// unsupported says why the app cannot work on any of nodes (external:
+	// a cluster k8slocalcli did not create), or "". It runs in the precheck
+	// on the cluster's nodes and, through Unavailable, before a cluster is
+	// created (on the engine's host) and in the pickers, which lock the app.
+	unsupported func(nodes []Node, external bool) string
 
 	// --- how to install (sources) ---
 
@@ -169,7 +178,10 @@ type App struct {
 	// prepare runs before the install, e.g. Secrets or a database the chart
 	// expects to exist.
 	prepare func(ctx context.Context, env *Env) error
-	// afterManifest patches what manifestURL created (manifest method only).
+	// afterManifest patches what manifestURL created, or creates the custom
+	// resource that makes its operator deploy the app (operatorCR.deploy) —
+	// here rather than in configure so the wait counts against Timeout and
+	// the install step's image-pull checks (manifest method only).
 	afterManifest func(ctx context.Context, env *Env) error
 	// configure runs after the workloads are verified, e.g. creating custom
 	// resources served by the operator just installed.
@@ -210,6 +222,8 @@ var catalog = finalize([]App{
 	fluxApp,
 	argoCDApp,
 	crossplaneApp,
+	kubevirtApp,
+	cdiApp,
 	cnpgApp,
 	valkeyApp,
 	openBaoApp,

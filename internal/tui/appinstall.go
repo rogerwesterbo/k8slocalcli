@@ -15,6 +15,9 @@ type InstallOptions struct {
 	Routable bool
 	// Installed marks apps already in the cluster; the checklist shows them.
 	Installed map[string]bool
+	// Unavailable gives, per app that cannot work on the cluster's nodes, why
+	// not (apps.Unavailable); the checklist locks them.
+	Unavailable map[string]string
 	// Profile pre-selects the profile; empty means dev.
 	Profile cluster.Profile
 }
@@ -58,7 +61,7 @@ func RunAppInstall(opts InstallOptions) (InstallResult, error) {
 }
 
 func newInstallForm(opts InstallOptions) *installForm {
-	f := &installForm{appSelection: newAppSelection(nil, opts.Installed), opts: opts, profile: opts.Profile.OrDefault()}
+	f := &installForm{appSelection: newAppSelection(nil, opts.Installed, opts.Unavailable), opts: opts, profile: opts.Profile.OrDefault()}
 	openApps := func() bool {
 		f.show(f.checklist(func() string { return fmt.Sprintf("Apps — %s profile", f.profile) }))
 		return true

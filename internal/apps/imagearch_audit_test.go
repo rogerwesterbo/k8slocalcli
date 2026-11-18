@@ -246,6 +246,11 @@ var (
 	// --prometheus-config-reloader=quay.io/...:v0.95.1. Only references
 	// with a registry host count, so ordinary flag values do not.
 	imageFlag = regexp.MustCompile(`--[a-z0-9-]+=([a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?/[a-z0-9._/-]+(?::[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64}))`)
+	// imageEnv matches an image passed to an operator as an env value, e.g.
+	// CDI's "- name: IMPORTER_IMAGE / value: quay.io/kubevirt/cdi-importer:v1.66.1".
+	// Like imageFlag, only references with a registry host and a tag or
+	// digest count, so ordinary values do not.
+	imageEnv = regexp.MustCompile(`(?m)^\s*value:\s*["']?([a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?/[a-z0-9._/-]+(?::[A-Za-z0-9._-]+|@sha256:[a-f0-9]{64}))["']?\s*$`)
 	// imageRef is what a value must look like to be an image reference.
 	imageRef = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]*(?::[A-Za-z0-9._-]+)?(?:@sha256:[a-f0-9]{64})?$`)
 )
@@ -258,8 +263,10 @@ func imageRefs(yaml string) []string {
 			refs = append(refs, v)
 		}
 	}
-	for _, m := range imageFlag.FindAllStringSubmatch(yaml, -1) {
-		refs = append(refs, m[1])
+	for _, re := range []*regexp.Regexp{imageFlag, imageEnv} {
+		for _, m := range re.FindAllStringSubmatch(yaml, -1) {
+			refs = append(refs, m[1])
+		}
 	}
 	return mergeSorted(nil, refs)
 }
@@ -284,6 +291,13 @@ spec:
         - --web.listen-address=:10250
         - --log-level=info
     - image: busybox:1.37
+      env:
+        - name: IMPORTER_IMAGE
+          value: quay.io/kubevirt/cdi-importer:v1.66.1
+        - name: ENDPOINT
+          value: https://example.com/path
+        - name: VERBOSITY
+          value: "1"
   imageName: ghcr.io/cloudnative-pg/postgresql:18.1
   image: '{{ .Values.image }}'
   image:
@@ -300,6 +314,7 @@ data:
 		"busybox:1.37",
 		"busybox@sha256:" + strings.Repeat("a", 64),
 		"ghcr.io/cloudnative-pg/postgresql:18.1",
+		"quay.io/kubevirt/cdi-importer:v1.66.1",
 		"quay.io/prometheus-operator/prometheus-config-reloader:v0.95.1",
 		"quay.io/prometheus-operator/prometheus-operator:v0.95.1",
 	}

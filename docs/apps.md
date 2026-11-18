@@ -108,6 +108,38 @@ Behind a TLS-intercepting proxy both are given the CA files in
 
 **crossplane** — Crossplane; add providers from the Upbound marketplace.
 
+### Virtualization
+
+**kubevirt** — KubeVirt, virtual machines as Kubernetes resources
+(`VirtualMachine`, `VirtualMachineInstance`). The install boots a small
+CirrOS VM to prove it works. Use it with `virtctl` (`kubectl krew install
+virt`); the notes after installing show a test VM.
+
+- **Apple Silicon: not available.** Docker Desktop has no `/dev/kvm`, and
+  without KVM KubeVirt cannot run VMs on arm64 at all (it allows only the
+  `host-passthrough` CPU there, which QEMU cannot emulate). This holds for kind
+  and Talos alike. The forms show kubevirt as `unsupported` and say why;
+  `create --app kubevirt` stops before building the cluster, and `app install`
+  before installing anything. arm64 nodes **with** KVM (a Linux arm server via
+  `--context`) are fine.
+- **amd64 Docker hosts:** k8slocalcli clusters allow QEMU emulation, so VMs run
+  (slowly); a node that has KVM (kind on a Linux host) still uses it. On kind
+  under Docker Desktop the pod network's MTU is 65535, more than a VM's network
+  device accepts, so VMs with the default pod network may not start — the
+  install then fails with KubeVirt's own message. Talos uses MTU 1500.
+- `--context` clusters keep KubeVirt's defaults (KVM required).
+
+**cdi** — the Containerized Data Importer: a `DataVolume` imports a disk image
+(an http(s) URL, a containerdisk from a registry, or an upload) into a PVC for
+a VM to boot from. Needs a default StorageClass. The install imports a small
+containerdisk to prove it works. Independent of kubevirt, but meant for it.
+Behind a TLS-intercepting proxy, http(s) imports need the proxy's CA in a
+ConfigMap named by the DataVolume's `certConfigMap`; registry imports with
+`pullMethod: node` use the nodes' trust instead.
+
+Neither has a Helm chart upstream, so both install via `manifest` only, and the
+profiles change nothing.
+
 ### Data
 
 **cnpg** — the CloudNativePG operator **and** a Postgres cluster `postgres` in
@@ -212,10 +244,12 @@ failure says which step it was:
 2. tools, dependencies and requirements are in place, and whether it is
    already installed — you are asked before it is re-applied (`--reinstall`
    skips the question);
-3. install (10 minutes; 15 for Longhorn, Keycloak and kube-prometheus-stack);
+3. install (10 minutes; 15 for Longhorn, Keycloak, kube-prometheus-stack,
+   KubeVirt and CDI);
 4. every workload finished rolling out (5 minutes);
 5. it actually works (5 minutes) — e.g. a volume is written, `valkey-cli ping`
-   answers, the metrics API responds, the cert-manager webhook accepts requests.
+   answers, the metrics API responds, the cert-manager webhook accepts requests,
+   a VM boots.
 
 ## Uninstalling
 
@@ -229,18 +263,22 @@ deleted (Argo CD or Flux removes what they deployed), its Helm release is
 uninstalled, or its manifest is deleted.
 
 - **Kept** unless you pass `--purge`: the app's namespace, with its generated
-  passwords and data volumes. CRDs are always kept — deleting one would delete
-  every resource of that kind in the cluster.
+  passwords and data volumes. CRDs are kept — deleting one would delete
+  every resource of that kind in the cluster (KubeVirt and CDI excepted, below).
 - **Refused** while something still needs the app — keycloak needs cnpg, apps
   installed with `:flux`/`:argo` need Flux/Argo CD, verified HTTPS needs
   cert-manager. `--force` removes it anyway.
+- **KubeVirt and CDI** delete all their CRDs when removed, and with them every
+  `VirtualMachine` or `DataVolume` in the cluster, so uninstalling is refused
+  while any exist. Even with `--force`, KubeVirt refuses while a VM is running
+  and CDI while a DataVolume exists.
 - **Never touched**: installs k8slocalcli did not make, such as kind's own
   local-path-provisioner. They are listed in the form but cannot be selected.
 
 ## kind and Talos differences
 
 - Talos enforces Pod Security `baseline`; apps that need host access (local-path,
-  NFS, Longhorn, MetalLB, kube-prometheus-stack, Trivy) get their namespace
+  NFS, Longhorn, MetalLB, kube-prometheus-stack, Trivy, KubeVirt) get their namespace
   labelled `privileged` automatically. If one was installed without the labels
   (by an older k8slocalcli), the next `app install` adds them — otherwise, for
   example, a new app's volume stays Pending because local-path's helper pod is
@@ -250,5 +288,5 @@ uninstalled, or its manifest is deleted.
   (catalog apps directly; other namespaces only after you confirm, since that
   turns their restrictions off).
 - Talos has no default StorageClass: install `local-path` first for cnpg,
-  Keycloak and the production profile.
+  Keycloak, CDI and the production profile.
 - kind ships local-path already; it is detected and left alone.

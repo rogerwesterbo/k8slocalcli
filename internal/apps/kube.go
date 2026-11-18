@@ -220,6 +220,21 @@ func (e *Env) isTalos(ctx context.Context) bool {
 	return err == nil && strings.HasPrefix(strings.TrimSpace(out), "Talos")
 }
 
+// lastWarning returns the message of the newest Warning event about the named
+// object in ns, or "". A custom resource stuck short of Ready usually says
+// why only there. It gets its own deadline: callers ask after a wait on ctx
+// has timed out.
+func (e *Env) lastWarning(ctx context.Context, ns, name string) string {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	out, err := e.kubectlQuiet(ctx, "get", "events", "-n", ns, "--sort-by=.lastTimestamp",
+		"--field-selector", "type=Warning,involvedObject.name="+name, "-o", "jsonpath={.items[-1:].message}")
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out)
+}
+
 // randomPassword returns a URL-safe random password (n bytes of entropy).
 func randomPassword(n int) (string, error) {
 	b := make([]byte, n)

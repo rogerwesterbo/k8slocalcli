@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -125,5 +126,29 @@ func TestInstallFormMethod(t *testing.T) {
 	}
 	if got := f.appsText(false); !strings.Contains(got, "(") {
 		t.Errorf("mixed methods should be listed per app: %q", got)
+	}
+}
+
+// An app that cannot work on the cluster is shown as unsupported, cannot be
+// ticked, says why on its row, and is never requested.
+func TestInstallFormUnavailableApp(t *testing.T) {
+	const why = "no node can run VMs"
+	f := newInstallForm(InstallOptions{Target: "cluster dev", Unavailable: map[string]string{"kubevirt": why}})
+	f.focus = installApps
+	f.handleKey("<Enter>")
+	idx := slices.IndexFunc(f.catalog, func(a apps.App) bool { return a.Name == "kubevirt" })
+	if !strings.Contains(f.open.rows()[idx], "unsupported") {
+		t.Errorf("unavailable apps should be marked: %q", f.open.rows()[idx])
+	}
+	for range idx {
+		f.handleKey("<Down>")
+	}
+	f.handleKey("<Space>")
+	if help := f.open.detail(); !strings.Contains(help, "cannot be selected: "+why) {
+		t.Errorf("help should give the reason, got %q", help)
+	}
+	f.handleKey("<Enter>")
+	if n := len(f.result().Apps); n != 0 {
+		t.Errorf("an unavailable app was requested: %+v", f.result().Apps)
 	}
 }
